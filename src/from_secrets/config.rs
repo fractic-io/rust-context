@@ -59,7 +59,7 @@ pub async fn load_secrets<T: SecretsConfigEnum>(
 ) -> Result<SecretValues<T>, ServerError> {
     let region_str = env.get(&SecretsEnvConfig::SecretsRegion)?;
     let region = Region::new(region_str.clone());
-    let shared_config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+    let shared_config = aws_config::defaults(BehaviorVersion::v2025_01_17())
         .region(region)
         .load()
         .await;
