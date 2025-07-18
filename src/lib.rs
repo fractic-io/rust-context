@@ -8,7 +8,28 @@
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, punctuated::Punctuated, Ident, ItemTrait, Token, Type};
+
+// Helper for parsing a single env variable definition like `VAR: Type`
+struct EnvField {
+    ident: Ident,
+    _colon_token: Token![:],
+    ty: Type,
+}
+
+impl Parse for EnvField {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let ident: Ident = input.parse()?;
+        let _colon_token: Token![:] = input.parse()?;
+        let ty: Type = input.parse()?;
+        Ok(EnvField {
+            ident,
+            _colon_token,
+            ty,
+        })
+    }
+}
 
 const SECRETS_REGION: &str = "SECRETS_REGION";
 const SECRETS_ID: &str = "SECRETS_ID";
@@ -26,15 +47,11 @@ const SECRETS_ID: &str = "SECRETS_ID";
 /// Plus a convenience macro to *implement* any view-trait for `Env`.
 #[proc_macro]
 pub fn env_config(input: TokenStream) -> TokenStream {
-    let vars = parse_macro_input!(input as Punctuated<syn::Pair, Token![,]>);
+    let vars = parse_macro_input!(input with Punctuated::<EnvField, Token![,]>::parse_terminated);
 
     let mut fields = Vec::<(Ident, Type)>::new();
-    for pair in vars {
-        let (ident, ty) = match pair {
-            syn::Pair::Punctuated(syn::Pat::Ident(pat_ident), _comma, ty) => (pat_ident.ident, ty),
-            _ => unreachable!("parser guarantees pattern"),
-        };
-        fields.push((ident, ty));
+    for field in vars {
+        fields.push((field.ident, field.ty));
     }
 
     let field_defs = fields.iter().map(|(i, t)| quote!(pub #i: #t,));
@@ -76,21 +93,42 @@ pub fn env_config(input: TokenStream) -> TokenStream {
     .into()
 }
 
+// Help parse the arguments for delegate_env_view_methods: a trait path and a self identifier
+struct DelegateArgs {
+    trait_path: syn::Path,
+    _comma: Token![,],
+    self_ident: Ident,
+}
+
+impl Parse for DelegateArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let trait_path: syn::Path = input.parse()?;
+        let _comma: Token![,] = input.parse()?;
+        let self_ident: Ident = input.parse()?;
+        Ok(DelegateArgs {
+            trait_path,
+            _comma,
+            self_ident,
+        })
+    }
+}
+
 /// Used *inside* the helper above.  Generates a body for every method in the
 /// trait that looks like `&self.db_url`.
 #[proc_macro]
 pub fn delegate_env_view_methods(input: TokenStream) -> TokenStream {
     // input = `$trait, self`
-    let mut iter = input.into_iter();
-    let trait_path: syn::Path = syn::Path::from(iter.next().unwrap().into());
-    let self_tok = iter.next().unwrap(); // 'self' ident
-    let self_ident: Ident = syn::parse(self_tok.into()).unwrap();
+    let DelegateArgs {
+        trait_path,
+        self_ident,
+        ..
+    } = parse_macro_input!(input as DelegateArgs);
 
     // Load the trait declaration so we can iterate over its methods.
     // (We rely on the trait being in scope – fine for normal Rust workflows.)
     let item: ItemTrait = syn::parse_quote!( trait Dummy for DummyType : #trait_path {} );
     let methods = item.items.iter().filter_map(|it| {
-        if let syn::TraitItem::Method(m) = it {
+        if let syn::TraitItem::Fn(m) = it {
             Some(m.sig.clone())
         } else {
             None
