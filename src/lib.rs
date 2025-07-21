@@ -272,6 +272,23 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         })
         .collect();
 
+    // Helper lists for struct initialisation
+    let env_idents: Vec<_> = env
+        .iter()
+        .map(|kv| {
+            let ident = to_snake(&kv.key);
+            quote! { #ident }
+        })
+        .collect();
+
+    let secret_idents: Vec<_> = secrets
+        .iter()
+        .map(|kv| {
+            let ident = to_snake(&kv.key);
+            quote! { #ident }
+        })
+        .collect();
+
     // SECRETS
     let secret_field_defs: Vec<_> = secrets
         .iter()
@@ -355,6 +372,15 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         })
         .collect();
 
+    // Automatically implement the `CtxHas*` accessor traits for the context.
+    let dep_trait_impls: Vec<_> = deps
+        .iter()
+        .map(|dp| {
+            let trait_name = format_ident!("CtxHas{}", dp.trait_ident);
+            quote! { impl #trait_name for #ctx_name {} }
+        })
+        .collect();
+
     // Views impls
     let view_impls: Vec<_> = views
         .iter()
@@ -380,9 +406,12 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 #(#dep_builder_inits)*
 
                 let ctx = Arc::new(Self {
-                    #(#env::#env_item,) *
-                }); // FIXME
-                // The above line is intentionally wrong to produce compile error
+                    #(#env_idents),*,
+                    #(#secret_idents),*,
+                    #(#dep_field_inits),*
+                });
+
+                ctx
             }
         }
 
@@ -394,6 +423,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         }
 
         #(#view_impls)*
+        #(#dep_trait_impls)*
     }
 }
 
