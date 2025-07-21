@@ -1,5 +1,5 @@
 [package]
-name = "fractic-env-config"
+name = "fractic-ctx"
 version = "2.0.0"
 authors = ["Mart van Buren <mart@fractic.io>"]
 edition = "2021"
