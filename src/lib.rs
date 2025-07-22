@@ -179,10 +179,10 @@ impl Parse for DefineCtxViewInput {
         braced!(deps_content in input);
         let dep_items: Punctuated<Ident, Token![,]> =
             deps_content.parse_terminated(Ident::parse, Token![,])?;
+        input.parse::<Token![,]>()?;
 
-        // Parse optional `req_impl { .. }` section
-        input.parse::<Token![,]>()?; // consume the comma after deps
-        let _req_kw: Ident = input.parse()?; // expect `req_impl`
+        // req_impl { .. }
+        let _req_kw: Ident = input.parse()?;
         let req_content;
         braced!(req_content in input);
         let req_items: Punctuated<Path, Token![,]> =
