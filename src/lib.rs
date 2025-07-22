@@ -243,9 +243,13 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let ty = &kv.ty;
             quote! {
                 let #ident: #ty = std::env::var(#var_name)
-                    .expect(concat!("Missing env var `", #var_name, "`"))
+                    .map_err(|_| ::fractic_server_error::InitError::new(
+                        concat!("missing env var `", #var_name, "`")
+                    ).into())?
                     .parse()
-                    .expect(concat!("Failed to parse env var `", #var_name, "`"));
+                    .map_err(|e| ::fractic_server_error::InitError::with_debug(
+                        concat!("failed to parse env var `", #var_name, "`"), &e
+                    ).into())?;
             }
         })
         .collect();
@@ -292,7 +296,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let __secret_map = __secrets_util
                 .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*])
                 .await
-                .expect("Failed to load secrets");
+                .map_err(|e| ::fractic_server_error::InitError::with_debug("failed to load secrets", &e).into())?;
         }
     } else {
         TokenStream2::new()
@@ -307,9 +311,13 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             quote! {
                 let #ident: #ty = __secret_map
                     .get(#key_name)
-                    .expect(concat!("Missing secret key `", #key_name, "`"))
+                    .ok_or_else(|| ::fractic_server_error::InitError::new(
+                        concat!("missing secret key `", #key_name, "`")
+                    ).into())?
                     .parse()
-                    .expect(concat!("Failed to parse secret `", #key_name, "`"));
+                    .map_err(|e| ::fractic_server_error::InitError::with_debug(
+                        concat!("failed to parse secret `", #key_name, "`"), &e
+                    ).into())?;
             }
         })
         .collect();
@@ -455,14 +463,18 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
 
         impl #ctx_name {
             /// Build an async-initialised, reference-counted context *without* eagerly creating deps.
-            pub async fn init() -> std::sync::Arc<Self> {
+            pub async fn init() -> ::std::result::Result<std::sync::Arc<Self>, ::fractic_server_error::ServerError> {
                 use std::sync::Arc;
 
                 // Mandatory runtime configuration.
                 let secrets_fetch_region = std::env::var(stringify!(#secrets_region_ident))
-                    .expect(concat!("Missing env var `", stringify!(#secrets_region_ident), "`"));
+                    .map_err(|_| ::fractic_server_error::InitError::new(
+                        concat!("missing env var `", stringify!(#secrets_region_ident), "`")
+                    ).into())?;
                 let secrets_fetch_id = std::env::var(stringify!(#secrets_id_ident))
-                    .expect(concat!("Missing env var `", stringify!(#secrets_id_ident), "`"));
+                    .map_err(|_| ::fractic_server_error::InitError::new(
+                        concat!("missing env var `", stringify!(#secrets_id_ident), "`")
+                    ).into())?;
 
                 #(#env_inits)*
                 #secret_fetch
@@ -478,7 +490,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     __weak_self: weak.clone(),
                 });
 
-                ctx
+                ::std::result::Result::Ok(ctx)
             }
         }
 
