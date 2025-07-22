@@ -34,6 +34,7 @@
 // ------------------------------------------------------------
 
 mod constants;
+pub mod secrets;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -298,6 +299,26 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             quote! { pub #ident: #ty }
         })
         .collect();
+    let secret_key_strs: Vec<_> = secrets
+        .iter()
+        .map(|kv| {
+            let key_name = kv.key.to_string();
+            quote! { #key_name }
+        })
+        .collect();
+    // Secret map fetch (single call to the backend)
+    let secret_fetch: TokenStream2 = if !secrets.is_empty() {
+        quote! {
+            let __secret_map = ::fractic_ctx::secrets::load_secrets(&[
+                #(#secret_key_strs),*
+            ])
+            .await
+            .expect("Failed to load secrets");
+        }
+    } else {
+        TokenStream2::new()
+    };
+
     let secret_inits: Vec<_> = secrets
         .iter()
         .map(|kv| {
@@ -305,10 +326,11 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let ty = &kv.ty;
             let key_name = kv.key.to_string();
             quote! {
-                let #ident: #ty = {
-                    // TODO: Replace with real secrets backend
-                    todo!("Fetch secret `{}`", #key_name);
-                };
+                let #ident: #ty = __secret_map
+                    .get(#key_name)
+                    .expect(concat!("Missing secret key `", #key_name, "`"))
+                    .parse()
+                    .expect(concat!("Failed to parse secret `", #key_name, "`"));
             }
         })
         .collect();
@@ -398,10 +420,11 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         }
 
         impl #ctx_name {
-            /// Build a fully‑initialised, reference‑counted Ctx.
+            /// Build a fully-initialised, reference-counted Ctx.
             pub async fn init() -> std::sync::Arc<Self> {
                 use std::sync::Arc;
                 #(#env_inits)*
+                #secret_fetch
                 #(#secret_inits)*
                 #(#dep_builder_inits)*
 
