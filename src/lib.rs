@@ -361,29 +361,30 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let override_fn = format_ident!("override_{}", field);
             let default_fn = format_ident!("__default_{}", field);
             quote! {
-                pub async fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
+                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
                     // Fast path – check without awaiting expensive build.
                     if let Some(existing) = {
                         let read = self.#field.read().await;
                         (*read).clone()
                     } {
-                        return existing;
+                        return ::std::result::Result::Ok(existing);
                     }
 
                     // Build the dependency outside of any locks to avoid deadlocks.
                     let ctx_arc = self.__weak_self
                         .upgrade()
                         .expect("Ctx weak ptr lost – this should never happen");
-                    let built = #default_fn(ctx_arc).await;
+                    let built = #default_fn(ctx_arc).await?;
 
                     // Attempt to store the newly built instance, but respect races.
                     let mut write = self.#field.write().await;
-                    if let Some(ref arc) = *write {
+                    let arc = if let Some(ref arc) = *write {
                         arc.clone()
                     } else {
                         write.replace(built.clone());
                         built
-                    }
+                    };
+                    ::std::result::Result::Ok(arc)
                 }
 
                 pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
@@ -403,7 +404,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             quote! {
                 #[async_trait::async_trait]
                 impl #trait_name for #ctx_name {
-                    async fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
+                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
                         self.#getter().await
                     }
                 }
@@ -529,7 +530,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .map(|ident| {
             let fn_name = to_snake(ident);
             quote! {
-                fn #fn_name(&self) -> std::sync::Arc<dyn #ident + Send + Sync>;
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #ident + Send + Sync>, ::fractic_server_error::ServerError>;
             }
         })
         .collect();
@@ -566,7 +567,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .map(|ident| {
             let fn_name = to_snake(ident);
             quote! {
-                async fn #fn_name(&self) -> std::sync::Arc<dyn #ident + Send + Sync> {
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #ident + Send + Sync>, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -622,11 +623,11 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
         /// Auto-generated accessor_trait for the dependency.
         #[async_trait::async_trait]
         pub trait #trait_name {
-            async fn #getter(&self) -> std::sync::Arc<dyn #trait_ident + Send + Sync>;
+            async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ident + Send + Sync>, ::fractic_server_error::ServerError>;
         }
 
         #[doc(hidden)]
-        pub(crate) async fn #default_fn(ctx: std::sync::Arc<#ctx_ident>) -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
+        pub(crate) async fn #default_fn(ctx: std::sync::Arc<#ctx_ident>) -> ::std::result::Result<std::sync::Arc<dyn #trait_ident + Send + Sync>, ::fractic_server_error::ServerError> {
             (#builder)(ctx).await
         }
     }
