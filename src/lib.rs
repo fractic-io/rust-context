@@ -566,7 +566,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         #[macro_export]
         macro_rules! #impl_macro {
             ($ctx:ty) => {
-                impl #view_name for $ctx {
+                impl $crate::#view_name for $ctx {
                     #(#env_impls)*
                     #(#secret_impls)*
                     #(#dep_impls)*
