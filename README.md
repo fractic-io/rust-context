@@ -20,7 +20,7 @@ use rust_context::define_ctx;
 use services::default_db;
 
 define_ctx! {
-    ctx_name: AppCtx,
+    name:   AppCtx,
     env     { PORT: u16 },
     secrets { DB_URL: String },
     deps    { Database: default_db },
@@ -34,7 +34,7 @@ let ctx = AppCtx::init("SECRETS_REGION", "SECRETS_ID").await;
 use rust_context::define_ctx_view;
 
 define_ctx_view! {
-    view_name: DbCtxView,
+    name:   DbCtxView,
     env     { PORT: u16 },
     secrets { DB_URL: String },
     deps    { Database }

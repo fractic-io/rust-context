@@ -86,9 +86,9 @@ struct DefineCtxInput {
 impl Parse for DefineCtxInput {
     fn parse(input: ParseStream) -> Result<Self> {
         // ctx_name: FooCtx,
-        let ctx_kw: Ident = input.parse()?; // expect ctx_name
-        if ctx_kw != "ctx_name" {
-            return Err(input.error("expected `ctx_name:`"));
+        let ctx_kw: Ident = input.parse()?; // expect name
+        if ctx_kw != "name" {
+            return Err(input.error("expected `name:`"));
         }
         input.parse::<Token![:]>()?;
         let ctx_name: Ident = input.parse()?;
@@ -149,8 +149,8 @@ struct DefineCtxViewInput {
 impl Parse for DefineCtxViewInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let view_kw: Ident = input.parse()?;
-        if view_kw != "view_name" {
-            return Err(input.error("expected `view_name:`"));
+        if view_kw != "name" {
+            return Err(input.error("expected `name:`"));
         }
         input.parse::<Token![:]>()?;
         let view_name: Ident = input.parse()?;
