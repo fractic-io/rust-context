@@ -335,7 +335,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let dep_trait = &d.trait_ident;
             quote! {
                 #[doc(hidden)]
-                pub #field: std::sync::RwLock<Option<std::sync::Arc<dyn #dep_trait + Send + Sync>>>
+                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #dep_trait + Send + Sync>>>
             }
         })
         .collect();
@@ -344,7 +344,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .iter()
         .map(|d| {
             let field = to_snake(&d.trait_ident);
-            quote! { #field: std::sync::RwLock::new(None) }
+            quote! { #field: ::tokio::sync::RwLock::new(None) }
         })
         .collect();
 
@@ -357,27 +357,33 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let override_fn = format_ident!("override_{}", field);
             let default_fn = format_ident!("__default_{}", field);
             quote! {
-                pub fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
-                    // Fast path – already initialised.
-                    {
-                        let read = self.#field.read().unwrap();
-                        if let Some(ref arc) = *read { return arc.clone(); }
+                pub async fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
+                    // Fast path – check without awaiting expensive build.
+                    if let Some(existing) = {
+                        let read = self.#field.read().await;
+                        (*read).clone()
+                    } {
+                        return existing;
                     }
-                    // Slow path – build lazily.
-                    let mut write = self.#field.write().unwrap();
-                    if let Some(ref arc) = *write { return arc.clone(); }
 
+                    // Build the dependency outside of any locks to avoid deadlocks.
                     let ctx_arc = self.__weak_self
                         .upgrade()
                         .expect("Ctx weak ptr lost – this should never happen");
-                    let built = tokio::runtime::Handle::current()
-                        .block_on(#default_fn(ctx_arc));
-                    write.replace(built.clone());
-                    built
+                    let built = #default_fn(ctx_arc).await;
+
+                    // Attempt to store the newly built instance, but respect races.
+                    let mut write = self.#field.write().await;
+                    if let Some(ref arc) = *write {
+                        arc.clone()
+                    } else {
+                        write.replace(built.clone());
+                        built
+                    }
                 }
 
-                pub fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
-                    let mut lock = self.#field.write().unwrap();
+                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
+                    let mut lock = self.#field.write().await;
                     *lock = Some(new_impl);
                 }
             }
@@ -388,7 +394,16 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .iter()
         .map(|d| {
             let trait_name = format_ident!("CtxHas{}", d.trait_ident);
-            quote! { impl #trait_name for #ctx_name {} }
+            let getter = to_snake(&d.trait_ident);
+            let dep_trait = &d.trait_ident;
+            quote! {
+                #[async_trait::async_trait]
+                impl #trait_name for #ctx_name {
+                    async fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
+                        self.#getter().await
+                    }
+                }
+            }
         })
         .collect();
 
@@ -547,8 +562,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .map(|ident| {
             let fn_name = to_snake(ident);
             quote! {
-                fn #fn_name(&self) -> std::sync::Arc<dyn #ident + Send + Sync> {
-                    self.#fn_name()
+                async fn #fn_name(&self) -> std::sync::Arc<dyn #ident + Send + Sync> {
+                    self.#fn_name().await
                 }
             }
         })
@@ -566,6 +581,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
     quote! {
         // View trait (signatures only).
+        #[async_trait::async_trait]
         pub trait #view_name #super_traits {
             #(#env_sigs)*
             #(#secret_sigs)*
@@ -576,6 +592,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         #[macro_export]
         macro_rules! #impl_macro {
             ($ctx:ty) => {
+                #[async_trait::async_trait]
                 impl $crate::#view_name for $ctx {
                     #(#env_impls)*
                     #(#secret_impls)*
@@ -598,8 +615,9 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
 
     quote! {
         /// Auto-generated accessor_trait for the dependency.
+        #[async_trait::async_trait]
         pub trait #trait_name {
-            fn #getter(&self) -> std::sync::Arc<dyn #trait_ident + Send + Sync>;
+            async fn #getter(&self) -> std::sync::Arc<dyn #trait_ident + Send + Sync>;
         }
 
         #[doc(hidden)]

@@ -17,7 +17,6 @@ Example
 ```rust
 // ─── root crate ─────────────────────────────────────────────
 use rust_context::define_ctx;
-use services::default_db;
 
 define_ctx! {
     name:    Ctx,
@@ -25,7 +24,7 @@ define_ctx! {
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
     secrets  { DB_URL: String },
-    deps     { Database: default_db },
+    deps     { Database },
     views    { my_lib::DbCtxView }
 }
 
