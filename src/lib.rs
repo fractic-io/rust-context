@@ -34,15 +34,13 @@
 // ------------------------------------------------------------
 
 mod constants;
-pub mod secrets;
+mod secrets;
 
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{
-    braced, parse_macro_input, punctuated::Punctuated, token, Ident, Path, Result, Token, Type,
-};
+use syn::{braced, parse_macro_input, punctuated::Punctuated, Ident, Path, Result, Token, Type};
 
 // ──────────────────────────────────────────────────────────────
 // Utility helpers
@@ -309,7 +307,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     // Secret map fetch (single call to the backend)
     let secret_fetch: TokenStream2 = if !secrets.is_empty() {
         quote! {
-            let __secret_map = ::fractic_ctx::secrets::load_secrets(&[
+            let __secret_map = ::fractic_context::secrets::load_secrets(&[
                 #(#secret_key_strs),*
             ])
             .await
@@ -499,13 +497,14 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let field_snake = to_snake(&trait_ident);
     let trait_name = format_ident!("CtxHas{}", trait_ident);
     let getter = field_snake.clone();
+    let default_fn = format_ident!("default_{}", field_snake);
 
     quote! {
         pub trait #trait_name {
             fn #getter(&self) -> std::sync::Arc<dyn #trait_ident + Send + Sync>;
         }
 
-        pub async fn default_#getter() -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
+        pub async fn #default_fn() -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
             #builder().await
         }
     }
