@@ -192,15 +192,19 @@ impl Parse for DefineCtxViewInput {
 
 #[derive(Debug)]
 struct RegisterDepInput {
+    ctx_ident: Ident,
     trait_ident: Ident,
     builder: Expr,
 }
 impl Parse for RegisterDepInput {
     fn parse(input: ParseStream) -> Result<Self> {
+        let ctx_ident: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
         let trait_ident: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
         let builder: Expr = input.parse()?;
         Ok(RegisterDepInput {
+            ctx_ident,
             trait_ident,
             builder,
         })
@@ -605,6 +609,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
 fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let RegisterDepInput {
+        ctx_ident,
         trait_ident,
         builder,
     } = input;
@@ -621,7 +626,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
         }
 
         #[doc(hidden)]
-        pub(crate) async fn #default_fn(ctx: std::sync::Arc<Ctx>) -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
+        pub(crate) async fn #default_fn(ctx: std::sync::Arc<#ctx_ident>) -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
             (#builder)(ctx).await
         }
     }
