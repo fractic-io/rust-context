@@ -1,4 +1,4 @@
-// rust_ctx_proc_macro/lib.rs
+// fractic-context/lib.rs
 // ============================================
 // rust-ctx: A procedural macro crate that generates a unified, thread‑safe
 // application context (Ctx) that bundles environment variables, secrets and
@@ -16,25 +16,7 @@
 //                     Generates the view‑agnostic accessor trait that lets
 //                     the Ctx expose the service, plus wires a default async
 //                     constructor that define_ctx! can call.
-//
-// Notes
-// -----
-// • Secrets fetching is intentionally left as `todo!()` – wire up AWS Secrets
-//   Manager or another backend here.
-// • The dependency singletons are stored behind `std::sync::RwLock`, which
-//   allows tests to replace them at runtime with `override_*` methods.
-// • All macros live in this single file to keep the example compact.  For
-//   production use you may want to break the helpers into modules.
-// • Requires Rust 1.70+ (edition 2021) and the following crates:
-//     syn = { version = "2", features = ["full"] }
-//     quote = "1"
-//     proc-macro2 = "1"
-//     convert_case = "0.6"
-//     once_cell = "1.18"
 // ------------------------------------------------------------
-
-mod constants;
-mod secrets;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -307,11 +289,14 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     // Secret map fetch (single call to the backend)
     let secret_fetch: TokenStream2 = if !secrets.is_empty() {
         quote! {
-            let __secret_map = ::fractic_context::secrets::load_secrets(&[
-                #(#secret_key_strs),*
-            ])
-            .await
-            .expect("Failed to load secrets");
+            // Build the AWS Secrets Manager helper and fetch the subset in one request.
+            let __secrets_util = ::fractic_aws_secrets::SecretsUtil::new(secrets_region.clone()).await;
+            let __secret_map = __secrets_util
+                .load_secrets(&secrets_id, &[
+                    #(#secret_key_strs),*
+                ])
+                .await
+                .expect("Failed to load secrets");
         }
     } else {
         TokenStream2::new()
@@ -414,13 +399,22 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         pub struct #ctx_name {
             #(#env_field_defs,)*
             #(#secret_field_defs,)*
+            pub secrets_region: String,
+            pub secrets_id: String,
             #(#dep_field_defs,)*
         }
 
         impl #ctx_name {
             /// Build a fully-initialised, reference-counted Ctx.
-            pub async fn init() -> std::sync::Arc<Self> {
+            pub async fn init(secrets_fetch_region: &str, secrets_fetch_id: &str) -> std::sync::Arc<Self> {
                 use std::sync::Arc;
+
+                // Resolve the region and secret identifier from environment variables.
+                let secrets_region = std::env::var(secrets_fetch_region)
+                    .expect("Missing secrets region env var");
+                let secrets_id = std::env::var(secrets_fetch_id)
+                    .expect("Missing secrets id env var");
+
                 #(#env_inits)*
                 #secret_fetch
                 #(#secret_inits)*
@@ -429,6 +423,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 let ctx = Arc::new(Self {
                     #(#env_idents),*,
                     #(#secret_idents),*,
+                    secrets_region,
+                    secrets_id,
                     #(#dep_field_inits),*
                 });
 
