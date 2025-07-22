@@ -632,15 +632,27 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let default_fn = format_ident!("__default_{}", field_snake);
 
     quote! {
-        /// Auto-generated accessor_trait for the dependency.
+        /// Accessor trait.
         #[async_trait::async_trait]
         pub trait #trait_name {
-            async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ident + Send + Sync>, ::fractic_server_error::ServerError>;
+            async fn #getter(
+                &self
+            ) -> ::std::result::Result<
+                std::sync::Arc<dyn #trait_ident + Send + Sync>,
+                ::fractic_server_error::ServerError
+            >;
         }
 
+        // Default builder.
         #[doc(hidden)]
-        pub(crate) async fn #default_fn(ctx: std::sync::Arc<#ctx_ident>) -> ::std::result::Result<std::sync::Arc<dyn #trait_ident + Send + Sync>, ::fractic_server_error::ServerError> {
-            (#builder)(ctx).await
+        pub(crate) async fn #default_fn(
+            ctx: std::sync::Arc<#ctx_ident>
+        ) -> ::std::result::Result<
+            std::sync::Arc<dyn #trait_ident + Send + Sync>,
+            ::fractic_server_error::ServerError
+        > {
+            let concrete = (#builder)(ctx).await?; // T
+            Ok(std::sync::Arc::new(concrete)) // Arc<dyn Trait>
         }
     }
 }

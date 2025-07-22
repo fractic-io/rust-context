@@ -45,7 +45,7 @@ define_ctx_view! {
 // ─── dependency registration ───────────────────────────────
 use rust_context::register_ctx_dependency;
 
-register_ctx_dependency!(Ctx, Database, |ctx: Arc<Ctx>| async {
-    Arc::new(DbImpl::new(...).await)
+register_ctx_dependency!(Ctx, Database, |ctx: Arc<Ctx>| async move {
+    DatabaseImpl::new(&*ctx).await
 });
 ```
