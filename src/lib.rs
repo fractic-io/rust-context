@@ -2,7 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parse_macro_input, punctuated::Punctuated, Ident, Path, Result, Token, Type};
+use syn::{
+    braced, parse_macro_input, punctuated::Punctuated, Expr, Ident, Path, Result, Token, Type,
+};
 
 // ──────────────────────────────────────────────────────────────
 // Helpers.
@@ -35,18 +37,13 @@ impl Parse for KeyTy {
 }
 
 #[derive(Debug)]
-struct DepPair {
+struct DepItem {
     trait_ident: Ident,
-    builder: Path,
 }
-impl Parse for DepPair {
+impl Parse for DepItem {
     fn parse(input: ParseStream) -> Result<Self> {
-        let trait_ident: Ident = input.parse()?;
-        input.parse::<Token![:]>()?;
-        let builder: Path = input.parse()?;
-        Ok(DepPair {
-            trait_ident,
-            builder,
+        Ok(DepItem {
+            trait_ident: input.parse()?,
         })
     }
 }
@@ -58,7 +55,7 @@ struct DefineCtxInput {
     secrets_region_ident: Ident,
     secrets_id_ident: Ident,
     secrets: Vec<KeyTy>,
-    deps: Vec<DepPair>,
+    deps: Vec<DepItem>,
     views: Vec<Path>,
 }
 impl Parse for DefineCtxInput {
@@ -110,8 +107,8 @@ impl Parse for DefineCtxInput {
         let _deps_kw: Ident = input.parse()?;
         let deps_content;
         braced!(deps_content in input);
-        let deps_items: Punctuated<DepPair, Token![,]> =
-            deps_content.parse_terminated(DepPair::parse, Token![,])?;
+        let deps_items: Punctuated<DepItem, Token![,]> =
+            deps_content.parse_terminated(DepItem::parse, Token![,])?;
         input.parse::<Token![,]>()?;
 
         // views { ... }
@@ -196,13 +193,13 @@ impl Parse for DefineCtxViewInput {
 #[derive(Debug)]
 struct RegisterDepInput {
     trait_ident: Ident,
-    builder: Path,
+    builder: Expr,
 }
 impl Parse for RegisterDepInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let trait_ident: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
-        let builder: Path = input.parse()?;
+        let builder: Expr = input.parse()?;
         Ok(RegisterDepInput {
             trait_ident,
             builder,
@@ -333,59 +330,64 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     // ── Dependencies ─────────────────────────────────────────────────────
     let dep_field_defs: Vec<_> = deps
         .iter()
-        .map(|dp| {
-            let field = to_snake(&dp.trait_ident);
-            let dep_trait = &dp.trait_ident;
+        .map(|d| {
+            let field = to_snake(&d.trait_ident);
+            let dep_trait = &d.trait_ident;
             quote! {
-                pub #field: std::sync::RwLock<std::sync::Arc<dyn #dep_trait + Send + Sync>>
-            }
-        })
-        .collect();
-
-    let dep_builder_inits: Vec<_> = deps
-        .iter()
-        .map(|dp| {
-            let tmp = format_ident!("__{}", to_snake(&dp.trait_ident));
-            let builder = &dp.builder;
-            quote! {
-                let #tmp = #builder().await;
+                #[doc(hidden)]
+                pub #field: std::sync::RwLock<Option<std::sync::Arc<dyn #dep_trait + Send + Sync>>>
             }
         })
         .collect();
 
     let dep_field_inits: Vec<_> = deps
         .iter()
-        .map(|dp| {
-            let field = to_snake(&dp.trait_ident);
-            let tmp = format_ident!("__{}", field);
-            quote! { #field: std::sync::RwLock::new(#tmp) }
+        .map(|d| {
+            let field = to_snake(&d.trait_ident);
+            quote! { #field: std::sync::RwLock::new(None) }
         })
         .collect();
 
     let dep_getters: Vec<_> = deps
         .iter()
-        .map(|dp| {
-            let field = to_snake(&dp.trait_ident);
-            let dep_trait = &dp.trait_ident;
+        .map(|d| {
+            let field = to_snake(&d.trait_ident);
+            let dep_trait = &d.trait_ident;
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
+            let default_fn = format_ident!("__default_{}", field);
             quote! {
                 pub fn #getter(&self) -> std::sync::Arc<dyn #dep_trait + Send + Sync> {
-                    self.#field.read().unwrap().clone()
+                    // Fast path – already initialised.
+                    {
+                        let read = self.#field.read().unwrap();
+                        if let Some(ref arc) = *read { return arc.clone(); }
+                    }
+                    // Slow path – build lazily.
+                    let mut write = self.#field.write().unwrap();
+                    if let Some(ref arc) = *write { return arc.clone(); }
+
+                    let ctx_arc = self.__weak_self
+                        .upgrade()
+                        .expect("Ctx weak ptr lost – this should never happen");
+                    let built = tokio::runtime::Handle::current()
+                        .block_on(#default_fn(ctx_arc));
+                    write.replace(built.clone());
+                    built
                 }
+
                 pub fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
                     let mut lock = self.#field.write().unwrap();
-                    *lock = new_impl;
+                    *lock = Some(new_impl);
                 }
             }
         })
         .collect();
 
-    // Implement the accessor traits
     let dep_trait_impls: Vec<_> = deps
         .iter()
-        .map(|dp| {
-            let trait_name = format_ident!("CtxHas{}", dp.trait_ident);
+        .map(|d| {
+            let trait_name = format_ident!("CtxHas{}", d.trait_ident);
             quote! { impl #trait_name for #ctx_name {} }
         })
         .collect();
@@ -419,19 +421,24 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     quote! {
         #[derive(Debug)]
         pub struct #ctx_name {
+            // Runtime settings.
             #(#env_field_defs,)*
             #(#secret_field_defs,)*
             pub secrets_fetch_region: String,
             pub secrets_fetch_id: String,
+            // Dependency slots.
             #(#dep_field_defs,)*
+            // Weak self-reference for lazy builders.
+            #[doc(hidden)]
+            pub __weak_self: std::sync::Weak<Self>,
         }
 
         impl #ctx_name {
-            /// Build an async-initialised, reference-counted context.
+            /// Build an async-initialised, reference-counted context *without* eagerly creating deps.
             pub async fn init() -> std::sync::Arc<Self> {
                 use std::sync::Arc;
 
-                // Resolve the region and secret identifier from environment variables.
+                // Mandatory runtime configuration.
                 let secrets_fetch_region = std::env::var(stringify!(#secrets_region_ident))
                     .expect(concat!("Missing env var `", stringify!(#secrets_region_ident), "`"));
                 let secrets_fetch_id = std::env::var(stringify!(#secrets_id_ident))
@@ -440,15 +447,18 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 #(#env_inits)*
                 #secret_fetch
                 #(#secret_inits)*
-                #(#dep_builder_inits)*
 
-                Arc::new(Self {
-                    #(#env_idents),*,
-                    #(#secret_idents),*,
+                // Create `Arc` cyclically to embed Weak<Self>.
+                let ctx = Arc::new_cyclic(|weak| Self {
+                    #(#env_idents,)*
+                    #(#secret_idents,)*
                     secrets_fetch_region,
                     secrets_fetch_id,
-                    #(#dep_field_inits),*
-                })
+                    #(#dep_field_inits,)*
+                    __weak_self: weak.clone(),
+                });
+
+                ctx
             }
         }
 
@@ -462,7 +472,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         // Blanket accessor-trait impls.
         #(#dep_trait_impls)*
 
-        // Bring in all view implementations.
+        // Bring in all view impls.
         #(#view_impl_macro_calls)*
     }
 }
@@ -584,15 +594,17 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let field_snake = to_snake(&trait_ident);
     let trait_name = format_ident!("CtxHas{}", trait_ident);
     let getter = field_snake.clone();
-    let default_fn = format_ident!("default_{}", field_snake);
+    let default_fn = format_ident!("__default_{}", field_snake);
 
     quote! {
+        /// Auto-generated accessor_trait for the dependency.
         pub trait #trait_name {
             fn #getter(&self) -> std::sync::Arc<dyn #trait_ident + Send + Sync>;
         }
 
-        pub async fn #default_fn() -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
-            #builder().await
+        #[doc(hidden)]
+        pub(crate) async fn #default_fn(ctx: std::sync::Arc<Ctx>) -> std::sync::Arc<dyn #trait_ident + Send + Sync> {
+            (#builder)(ctx).await
         }
     }
 }
