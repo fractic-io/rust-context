@@ -466,36 +466,24 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     let env_methods: Vec<_> = env
         .iter()
         .map(|kv| {
-            let field = to_snake(&kv.key);
+            let fn_name = to_snake(&kv.key);
             let ty = &kv.ty;
-            quote! {
-                fn #field(&self) -> &#ty {
-                    &self.#field
-                }
-            }
+            quote! { fn #fn_name(&self) -> &#ty; }
         })
         .collect();
     let secret_methods: Vec<_> = secrets
         .iter()
         .map(|kv| {
-            let field = to_snake(&kv.key);
+            let fn_name = to_snake(&kv.key);
             let ty = &kv.ty;
-            quote! {
-                fn #field(&self) -> &#ty {
-                    &self.#field
-                }
-            }
+            quote! { fn #fn_name(&self) -> &#ty; }
         })
         .collect();
     let dep_methods: Vec<_> = deps
         .iter()
         .map(|id| {
             let field = to_snake(id);
-            quote! {
-                fn #field(&self) -> std::sync::Arc<dyn #id + Send + Sync> {
-                    self.#field.read().unwrap().clone()
-                }
-            }
+            quote! { fn #field(&self) -> std::sync::Arc<dyn #id + Send + Sync>; }
         })
         .collect();
 
