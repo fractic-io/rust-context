@@ -54,6 +54,8 @@ impl Parse for DepPair {
 #[derive(Debug)]
 struct DefineCtxInput {
     ctx_name: Ident,
+    secrets_region_ident: Ident,
+    secrets_id_ident: Ident,
     env: Vec<KeyTy>,
     secrets: Vec<KeyTy>,
     deps: Vec<DepPair>,
@@ -68,6 +70,24 @@ impl Parse for DefineCtxInput {
         }
         input.parse::<Token![:]>()?;
         let ctx_name: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // secrets_region: REGION_ENV_VAR,
+        let sr_kw: Ident = input.parse()?;
+        if sr_kw != "secrets_region" {
+            return Err(input.error("expected `secrets_region:`"));
+        }
+        input.parse::<Token![:]>()?;
+        let secrets_region_ident: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // secrets_id: ID_ENV_VAR,
+        let sid_kw: Ident = input.parse()?;
+        if sid_kw != "secrets_id" {
+            return Err(input.error("expected `secrets_id:`"));
+        }
+        input.parse::<Token![:]>()?;
+        let secrets_id_ident: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
 
         // env { ... },
@@ -103,6 +123,8 @@ impl Parse for DefineCtxInput {
 
         Ok(DefineCtxInput {
             ctx_name,
+            secrets_region_ident,
+            secrets_id_ident,
             env: env_items.into_iter().collect(),
             secrets: sec_items.into_iter().collect(),
             deps: deps_items.into_iter().collect(),
@@ -194,6 +216,8 @@ impl Parse for RegisterDepInput {
 fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let DefineCtxInput {
         ctx_name,
+        secrets_region_ident,
+        secrets_id_ident,
         env,
         secrets,
         deps,
@@ -393,10 +417,11 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             pub async fn init(region_env: &str, id_env: &str) -> std::sync::Arc<Self> {
                 use std::sync::Arc;
 
-                let secrets_region = std::env::var(region_env)
-                    .expect("Missing secrets region env var");
-                let secrets_id = std::env::var(id_env)
-                    .expect("Missing secrets id env var");
+                // Resolve the region and secret identifier from environment variables.
+                let secrets_region = std::env::var(stringify!(#secrets_region_ident))
+                    .expect(concat!("Missing env var `", stringify!(#secrets_region_ident), "`"));
+                let secrets_id = std::env::var(stringify!(#secrets_id_ident))
+                    .expect(concat!("Missing env var `", stringify!(#secrets_id_ident), "`"));
 
                 #(#env_inits)*
                 #secret_fetch
