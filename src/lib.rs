@@ -394,11 +394,25 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let view_impl_macro_calls: Vec<_> = views
         .iter()
         .map(|path| {
-            // Split into crate-root and final segment
-            let crate_root = &path.segments.first().unwrap().ident;
-            let view_ident = &path.segments.last().unwrap().ident;
-            let impl_macro = format_ident!("__impl_{}_for", view_ident);
-            quote! { #crate_root::#impl_macro!(#ctx_name); }
+            // If the caller supplied a local path (e.g. `MyView`), we cannot
+            // know which crate exported the helper macro (`__impl_<View>_for`).
+            // Emit a dedicated error instead of rustc’s “partially resolved
+            // path in a macro”. Require absolute paths (e.g. `my_crate::MyView`).
+            if path.segments.len() < 2 {
+                let view_ident = &path.segments.first().unwrap().ident;
+                let msg = format!(
+                    "`define_ctx!`: view path `{}` must be an absolute path (e.g. `my_crate::{}`), \
+                    not a local identifier or brought into scope with a `use` statement.",
+                    view_ident, view_ident
+                );
+                quote! { compile_error!(#msg); }
+            } else {
+                // Split into crate-root and final segment.
+                let crate_root = &path.segments.first().unwrap().ident;
+                let view_ident = &path.segments.last().unwrap().ident;
+                let impl_macro = format_ident!("__impl_{}_for", view_ident);
+                quote! { #crate_root::#impl_macro!(#ctx_name); }
+            }
         })
         .collect();
 
