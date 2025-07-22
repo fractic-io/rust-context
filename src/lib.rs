@@ -54,9 +54,9 @@ impl Parse for DepPair {
 #[derive(Debug)]
 struct DefineCtxInput {
     ctx_name: Ident,
+    env: Vec<KeyTy>,
     secrets_region_ident: Ident,
     secrets_id_ident: Ident,
-    env: Vec<KeyTy>,
     secrets: Vec<KeyTy>,
     deps: Vec<DepPair>,
     views: Vec<Path>,
@@ -72,30 +72,30 @@ impl Parse for DefineCtxInput {
         let ctx_name: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
 
-        // secrets_region: REGION_ENV_VAR,
-        let sr_kw: Ident = input.parse()?;
-        if sr_kw != "secrets_region" {
-            return Err(input.error("expected `secrets_region:`"));
-        }
-        input.parse::<Token![:]>()?;
-        let secrets_region_ident: Ident = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // secrets_id: ID_ENV_VAR,
-        let sid_kw: Ident = input.parse()?;
-        if sid_kw != "secrets_id" {
-            return Err(input.error("expected `secrets_id:`"));
-        }
-        input.parse::<Token![:]>()?;
-        let secrets_id_ident: Ident = input.parse()?;
-        input.parse::<Token![,]>()?;
-
         // env { ... },
         let _env_kw: Ident = input.parse()?;
         let env_content;
         braced!(env_content in input);
         let env_items: Punctuated<KeyTy, Token![,]> =
             env_content.parse_terminated(KeyTy::parse, Token![,])?;
+        input.parse::<Token![,]>()?;
+
+        // secrets_fetch_region: REGION_ENV_VAR,
+        let sr_kw: Ident = input.parse()?;
+        if sr_kw != "secrets_fetch_region" {
+            return Err(input.error("expected `secrets_fetch_region:`"));
+        }
+        input.parse::<Token![:]>()?;
+        let secrets_region_ident: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // secrets_fetch_id: ID_ENV_VAR,
+        let sid_kw: Ident = input.parse()?;
+        if sid_kw != "secrets_fetch_id" {
+            return Err(input.error("expected `secrets_fetch_id:`"));
+        }
+        input.parse::<Token![:]>()?;
+        let secrets_id_ident: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
 
         // secrets { ... },
@@ -123,9 +123,9 @@ impl Parse for DefineCtxInput {
 
         Ok(DefineCtxInput {
             ctx_name,
+            env: env_items.into_iter().collect(),
             secrets_region_ident,
             secrets_id_ident,
-            env: env_items.into_iter().collect(),
             secrets: sec_items.into_iter().collect(),
             deps: deps_items.into_iter().collect(),
             views: views_items.into_iter().collect(),
@@ -216,9 +216,9 @@ impl Parse for RegisterDepInput {
 fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let DefineCtxInput {
         ctx_name,
+        env,
         secrets_region_ident,
         secrets_id_ident,
-        env,
         secrets,
         deps,
         views,
@@ -407,8 +407,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         pub struct #ctx_name {
             #(#env_field_defs,)*
             #(#secret_field_defs,)*
-            pub secrets_region: String,
-            pub secrets_id: String,
+            pub secrets_fetch_region: String,
+            pub secrets_fetch_id: String,
             #(#dep_field_defs,)*
         }
 
@@ -418,9 +418,9 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 use std::sync::Arc;
 
                 // Resolve the region and secret identifier from environment variables.
-                let secrets_region = std::env::var(stringify!(#secrets_region_ident))
+                let secrets_fetch_region = std::env::var(stringify!(#secrets_region_ident))
                     .expect(concat!("Missing env var `", stringify!(#secrets_region_ident), "`"));
-                let secrets_id = std::env::var(stringify!(#secrets_id_ident))
+                let secrets_fetch_id = std::env::var(stringify!(#secrets_id_ident))
                     .expect(concat!("Missing env var `", stringify!(#secrets_id_ident), "`"));
 
                 #(#env_inits)*
@@ -431,8 +431,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 Arc::new(Self {
                     #(#env_idents),*,
                     #(#secret_idents),*,
-                    secrets_region,
-                    secrets_id,
+                    secrets_fetch_region,
+                    secrets_fetch_id,
                     #(#dep_field_inits),*
                 })
             }

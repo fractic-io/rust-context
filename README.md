@@ -20,16 +20,13 @@ use rust_context::define_ctx;
 use services::default_db;
 
 define_ctx! {
-    name:   Ctx,
-
-    // Env vars for fetching secrets from AWS Secrets Manager:
-    secrets_region: SECRETS_REGION,
-    secrets_id: SECRETS_ID,
-
-    env     { PORT: u16 },
-    secrets { DB_URL: String },
-    deps    { Database: default_db },
-    views   { my_lib::DbCtxView }
+    name:    Ctx,
+    env      { PORT: u16 },
+    secrets_fetch_region: SECRETS_REGION,
+    secrets_fetch_id: SECRETS_ID,
+    secrets  { DB_URL: String },
+    deps     { Database: default_db },
+    views    { my_lib::DbCtxView }
 }
 
 // Initialise once at startup.
@@ -39,11 +36,10 @@ let ctx = Ctx::init().await;
 use rust_context::define_ctx_view;
 
 define_ctx_view! {
-    name:   DbCtxView,
-
-    env     { PORT: u16 },
-    secrets { DB_URL: String },
-    deps    { Database },
+    name:    DbCtxView,
+    env      { PORT: u16 },
+    secrets  { DB_URL: String },
+    deps     { Database },
     req_impl { LoggingCtxView }
 }
 
