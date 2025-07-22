@@ -1,7 +1,49 @@
-Rust utility to declare a program's execution requirements (ex. environment variables, secrets), and access them in a typed way. The configurations should be loaded at the start of the program, which will ensure all variables are present. Once loaded, the values are stored in a typed enum, such that the type system can ensure only valid values are used in the code.
+# fractic-context
 
-Currently supports loading from:
-- Environment variables.
-- Secrets stored in AWS Secrets Manager.
+Procedural macros for generating a typed, thread-safe **application context** that bundles:
 
-This code is provided as-is. For the time being, attention will not be given to backwards compatibility or clear documentation. It is open-sourced mainly for the chance that snippets may be useful to others looking to do similar tasks. Eventually, this may become a real library productionized and documented for external use.
+* mandatory environment variables
+* selected AWS Secrets Manager secrets (fetched once, cached)
+* overridable singleton dependencies
+
+Macros
+------
+* `define_ctx!` – emits a concrete `Ctx` with async `init`, getters and override helpers.
+* `define_ctx_view!` – emits a trait describing the subset of context a library needs.
+* `register_ctx_dependency!` – emits a `CtxHas*` accessor trait and a default async builder.
+
+Example
+-------
+```rust
+// ─── root crate ─────────────────────────────────────────────
+use rust_context::define_ctx;
+use services::default_db;
+
+define_ctx! {
+    ctx_name: AppCtx,
+    env     { PORT: u16 },
+    secrets { DB_URL: String },
+    deps    { Database: default_db },
+    views   { my_lib::DbCtxView }
+}
+
+// Initialise once at startup
+let ctx = AppCtx::init("SECRETS_REGION", "SECRETS_ID").await;
+
+// ─── library crate ──────────────────────────────────────────
+use rust_context::define_ctx_view;
+
+define_ctx_view! {
+    view_name: DbCtxView,
+    env     { PORT: u16 },
+    secrets { DB_URL: String },
+    deps    { Database }
+}
+
+// ─── dependency registration ───────────────────────────────
+use rust_context::register_ctx_dependency;
+
+register_ctx_dependency!(Database, || async {
+    std::sync::Arc::new(DbImpl::new().await)
+});
+```
