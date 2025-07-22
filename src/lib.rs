@@ -144,6 +144,7 @@ struct DefineCtxViewInput {
     env: Vec<KeyTy>,
     secrets: Vec<KeyTy>,
     deps: Vec<Ident>,
+    req_impl: Vec<Path>,
 }
 
 impl Parse for DefineCtxViewInput {
@@ -179,11 +180,20 @@ impl Parse for DefineCtxViewInput {
         let dep_items: Punctuated<Ident, Token![,]> =
             deps_content.parse_terminated(Ident::parse, Token![,])?;
 
+        // Parse optional `req_impl { .. }` section
+        input.parse::<Token![,]>()?; // consume the comma after deps
+        let _req_kw: Ident = input.parse()?; // expect `req_impl`
+        let req_content;
+        braced!(req_content in input);
+        let req_items: Punctuated<Path, Token![,]> =
+            req_content.parse_terminated(Path::parse_mod_style, Token![,])?;
+
         Ok(DefineCtxViewInput {
             view_name,
             env: env_items.into_iter().collect(),
             secrets: sec_items.into_iter().collect(),
             deps: dep_items.into_iter().collect(),
+            req_impl: req_items.into_iter().collect(),
         })
     }
 }
@@ -450,6 +460,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         env,
         secrets,
         deps,
+        req_impl,
     } = input;
 
     let env_methods: Vec<_> = env
@@ -476,8 +487,15 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
+    // Supertrait list
+    let supertraits: TokenStream2 = if !req_impl.is_empty() {
+        quote! { : #( #req_impl )+* }
+    } else {
+        TokenStream2::new()
+    };
+
     quote! {
-        pub trait #view_name {
+        pub trait #view_name #supertraits {
             #(#env_methods)*
             #(#secret_methods)*
             #(#dep_methods)*

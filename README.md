@@ -37,7 +37,8 @@ define_ctx_view! {
     name:   DbCtxView,
     env     { PORT: u16 },
     secrets { DB_URL: String },
-    deps    { Database }
+    deps    { Database },
+    req_impl { LoggingCtxView }
 }
 
 // ─── dependency registration ───────────────────────────────
