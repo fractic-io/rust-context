@@ -287,9 +287,9 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let secret_fetch: TokenStream2 = if !secrets.is_empty() {
         quote! {
             let __secrets_util =
-                ::fractic_aws_secrets::SecretsUtil::new(secrets_region.clone()).await;
+                ::fractic_aws_secrets::SecretsUtil::new(secrets_fetch_region.clone()).await;
             let __secret_map = __secrets_util
-                .load_secrets(&secrets_id, &[#(#secret_key_strs),*])
+                .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*])
                 .await
                 .expect("Failed to load secrets");
         }
@@ -414,7 +414,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
 
         impl #ctx_name {
             /// Build an async-initialised, reference-counted context.
-            pub async fn init(region_env: &str, id_env: &str) -> std::sync::Arc<Self> {
+            pub async fn init() -> std::sync::Arc<Self> {
                 use std::sync::Arc;
 
                 // Resolve the region and secret identifier from environment variables.
