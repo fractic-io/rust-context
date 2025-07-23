@@ -18,13 +18,15 @@ Example
 // ─── root crate ─────────────────────────────────────────────
 use rust_context::define_ctx;
 
+use crate::db::database_dep;
+
 define_ctx! {
     name:    Ctx,
     env      { PORT: u16 },
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
     secrets  { DB_URL: String },
-    deps     { Database },
+    deps     { database_dep },
     views    { my_lib::DbCtxView }
 }
 
@@ -47,5 +49,5 @@ use rust_context::register_ctx_dependency;
 
 register_ctx_dependency!(Ctx, Database, |ctx: Arc<Ctx>| async move {
     DatabaseImpl::new(&*ctx).await
-});
+}); // -> auto-generates to 'database_dep'
 ```

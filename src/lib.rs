@@ -19,6 +19,27 @@ fn to_snake(ident: &Ident) -> Ident {
     )
 }
 
+fn strip_dep_suffix(name: &str) -> &str {
+    name.strip_suffix("_dep").unwrap_or(name)
+}
+
+fn dep_field_ident(dep_mod_ident: &Ident) -> Ident {
+    // database_repository_dep → database_repository
+    to_snake(&format_ident!(
+        "{}",
+        strip_dep_suffix(&dep_mod_ident.to_string())
+    ))
+}
+
+fn trait_ident_from_dep_mod(dep_mod_ident: &Ident) -> Ident {
+    // database_repository_dep → DatabaseRepository
+    format_ident!(
+        "{}",
+        strip_dep_suffix(&dep_mod_ident.to_string()).to_case(Case::Pascal),
+        span = dep_mod_ident.span(),
+    )
+}
+
 // ──────────────────────────────────────────────────────────────
 // Input ASTs.
 // ──────────────────────────────────────────────────────────────
@@ -38,12 +59,12 @@ impl Parse for KeyTy {
 
 #[derive(Debug)]
 struct DepItem {
-    trait_ident: Ident,
+    mod_path: Path, // e.g. `database_repository_dep` or `my::nested::foo_dep`
 }
 impl Parse for DepItem {
     fn parse(input: ParseStream) -> Result<Self> {
         Ok(DepItem {
-            trait_ident: input.parse()?,
+            mod_path: input.parse()?,
         })
     }
 }
@@ -343,11 +364,13 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_field_defs: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
+            let dep_mod = &d.mod_path;
+            let dep_mod_ident = &dep_mod.segments.last().unwrap().ident;
+            let field_ident = dep_field_ident(dep_mod_ident);
+            let trait_ty = quote! { #dep_mod::Trait };
             quote! {
                 #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #dep_trait + Send + Sync>>>
+                pub #field_ident: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_ty + Send + Sync>>>
             }
         })
         .collect();
@@ -355,65 +378,55 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_field_inits: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
-            quote! { #field: ::tokio::sync::RwLock::new(None) }
+            let dep_mod_ident = &d.mod_path.segments.last().unwrap().ident;
+            let field_ident = dep_field_ident(dep_mod_ident);
+            quote! { #field_ident: ::tokio::sync::RwLock::new(None) }
         })
         .collect();
 
     let dep_getters: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
-            let getter = field.clone();
-            let override_fn = format_ident!("override_{}", field);
-            let default_fn = format_ident!("__default_{}", field);
+            let dep_mod = &d.mod_path;
+            let dep_mod_ident = &dep_mod.segments.last().unwrap().ident;
+            let field_ident = dep_field_ident(dep_mod_ident);
+            let getter_fn = field_ident.clone();
+            let override_fn = format_ident!("override_{}", field_ident);
+            let builder_fn = quote! { #dep_mod::__default };
+            let trait_ty = quote! { #dep_mod::Trait };
             quote! {
-                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
-                    // Fast path – check without awaiting expensive build.
-                    if let Some(existing) = {
-                        let read = self.#field.read().await;
-                        (*read).clone()
-                    } {
-                        return ::std::result::Result::Ok(existing);
+                pub async fn #getter_fn(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ty + Send + Sync>, ::fractic_server_error::ServerError> {
+                    if let Some(existing) = { let read = self.#field_ident.read().await; (*read).clone() } {
+                        return Ok(existing);
                     }
-
-                    // Build the dependency outside of any locks to avoid deadlocks.
-                    let ctx_arc = self.__weak_self
-                        .upgrade()
-                        .expect("Ctx weak ptr lost – this should never happen");
-                    let built = #default_fn(ctx_arc).await?;
-
-                    // Attempt to store the newly built instance, but respect races.
-                    let mut write = self.#field.write().await;
-                    let arc = if let Some(ref arc) = *write {
-                        arc.clone()
-                    } else {
-                        write.replace(built.clone());
-                        built
-                    };
-                    ::std::result::Result::Ok(arc)
+                    let ctx_arc = self.__weak_self.upgrade().expect("Ctx weak ptr lost – this should never happen");
+                    let built = #builder_fn(ctx_arc).await?;
+                    let mut write = self.#field_ident.write().await;
+                    let arc = if let Some(ref a) = *write { a.clone() } else { write.replace(built.clone()); built };
+                    Ok(arc)
                 }
-
-                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
-                    let mut lock = self.#field.write().await;
+                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_ty + Send + Sync>) {
+                    let mut lock = self.#field_ident.write().await;
                     *lock = Some(new_impl);
                 }
             }
         })
         .collect();
 
+    // Blanket accessor‑trait impls (reconstructed via heuristics).
     let dep_trait_impls: Vec<_> = deps
         .iter()
         .map(|d| {
-            let trait_name = format_ident!("CtxHas{}", d.trait_ident);
-            let getter = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
+            let dep_mod = &d.mod_path;
+            let dep_mod_ident = &dep_mod.segments.last().unwrap().ident;
+            let trait_ident = trait_ident_from_dep_mod(dep_mod_ident);
+            let ctx_has_trait = format_ident!("CtxHas{}", trait_ident);
+            let getter_fn = dep_field_ident(dep_mod_ident);
             quote! {
                 #[async_trait::async_trait]
-                impl #trait_name for #ctx_name {
-                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
-                        self.#getter().await
+                impl #dep_mod::#ctx_has_trait for #ctx_name {
+                    async fn #getter_fn(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_mod::Trait + Send + Sync>, ::fractic_server_error::ServerError> {
+                        self.#getter_fn().await
                     }
                 }
             }
@@ -626,33 +639,36 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
         trait_ident,
         builder,
     } = input;
-    let field_snake = to_snake(&trait_ident);
-    let trait_name = format_ident!("CtxHas{}", trait_ident);
-    let getter = field_snake.clone();
-    let default_fn = format_ident!("__default_{}", field_snake);
+
+    let mod_ident = format_ident!("{}_dep", to_snake(&trait_ident)); // e.g. DatabaseRepository → database_repository_dep
+    let trait_alias_ident = format_ident!("Trait");
+    let getter_fn_ident = to_snake(&trait_ident);
+    let ctx_has_trait_ident = format_ident!("CtxHas{}", trait_ident);
+    let default_fn_ident = format_ident!("__default"); // inside module – deterministic
 
     quote! {
-        /// Accessor trait.
-        #[async_trait::async_trait]
-        pub trait #trait_name {
-            async fn #getter(
-                &self
-            ) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ident + Send + Sync>,
-                ::fractic_server_error::ServerError
-            >;
-        }
+        #[allow(non_snake_case)]
+        pub mod #mod_ident {
+            use super::*; // include the original scope (trait, builder, etc.)
+            use async_trait::async_trait;
+            use std::sync::Arc;
 
-        // Default builder.
-        #[doc(hidden)]
-        pub(crate) async fn #default_fn(
-            ctx: std::sync::Arc<#ctx_ident>
-        ) -> ::std::result::Result<
-            std::sync::Arc<dyn #trait_ident + Send + Sync>,
-            ::fractic_server_error::ServerError
-        > {
-            let concrete = (#builder)(ctx).await?; // T
-            Ok(std::sync::Arc::new(concrete)) // Arc<dyn Trait>
+            // The canonical trait alias used by `define_ctx!`.
+            pub use super::#trait_ident as #trait_alias_ident;
+
+            /// Accessor trait automatically implemented for any context that embeds this dep.
+            #[async_trait]
+            pub trait #ctx_has_trait_ident {
+                async fn #getter_fn_ident(&self) -> ::std::result::Result<Arc<dyn #trait_alias_ident + Send + Sync>, ::fractic_server_error::ServerError>;
+            }
+
+            /// Lazily builds the dependency using the user supplied closure.
+            pub(crate) async fn #default_fn_ident(
+                ctx: Arc<#ctx_ident>
+            ) -> ::std::result::Result<Arc<dyn #trait_alias_ident + Send + Sync>, ::fractic_server_error::ServerError> {
+                let concrete = (#builder)(ctx).await?;
+                Ok(Arc::new(concrete))
+            }
         }
     }
 }
