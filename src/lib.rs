@@ -657,6 +657,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
         // Export alias for deterministic access at crate root.
         alias_reexports.push(quote! {
+            #[doc(hidden)]
             pub use #parent_path as #alias_mod_ident;
         });
     }
@@ -859,6 +860,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         }
 
         // View trait impl helper.
+        #[doc(hidden)]
         #[macro_export]
         macro_rules! #impl_macro {
             ($ctx:ty) => {
@@ -879,6 +881,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         }
 
         // Overlay impl helper.
+        #[doc(hidden)]
         #[macro_export]
         macro_rules! #overlay_impls_macro {
             ($ctx:ty) => {
@@ -905,6 +908,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
 
     quote! {
         /// Accessor trait.
+        #[doc(hidden)]
         #[async_trait::async_trait]
         pub trait #trait_name {
             async fn #getter(
