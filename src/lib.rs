@@ -704,7 +704,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
     // Super-trait list.
     let super_traits: TokenStream2 = if !req_impl.is_empty() {
-        quote! { : #( #req_impl )+* }
+        quote! { + #( #req_impl )+* }
     } else {
         TokenStream2::new()
     };
@@ -810,7 +810,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     quote! {
         // View trait.
         #[async_trait::async_trait]
-        pub trait #view_name #super_traits {
+        pub trait #view_name : Send + Sync #super_traits {
             #(#env_sigs)*
             #(#secret_sigs)*
             #(#dep_sigs)*
