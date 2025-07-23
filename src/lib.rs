@@ -508,14 +508,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         gen_dep_artifacts(&ctx_name, &dep_paths);
 
     // ── View invocations ─────────────────────────────────────────────────
-    // For each supplied view path, we will:
-    //   1. insert overlay fields into struct via __overlay_fields_<View>!()
-    //   2. after struct + inherent impl, pull in overlay impls via __overlay_impls_<View>_for!(#ctx_name)
-    //   3. implement the view trait itself via __impl_<View>_for!(#ctx_name)
-    //
-    // We require absolute paths (≥2 segments) so we can qualify macros.
-    let mut view_overlay_field_def_calls = Vec::<TokenStream2>::new();
-    let mut view_overlay_field_init_calls = Vec::<TokenStream2>::new();
+    let mut view_overlay_field_defs = Vec::<TokenStream2>::new();
+    let mut view_overlay_field_inits = Vec::<TokenStream2>::new();
     let mut view_overlay_impl_macro_calls = Vec::<TokenStream2>::new();
     let mut view_impl_macro_calls = Vec::<TokenStream2>::new();
 
@@ -535,15 +529,17 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         let view_ident = &path.segments.last().unwrap().ident;
 
         let impl_macro = format_ident!("__impl_{}_for", view_ident);
-        let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_ident);
         let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_ident);
+        let overlay_struct_name = format_ident!("__{}DepsOverlay", view_ident);
+        let overlay_field_ident = format_ident!("__{}_deps", to_snake(&view_ident));
 
-        view_overlay_field_def_calls.push(quote! {
-            #crate_root::#overlay_fields_macro!();
+        view_overlay_field_defs.push(quote! {
+            #[doc(hidden)]
+            pub #overlay_field_ident: #crate_root::#overlay_struct_name,
         });
 
-        view_overlay_field_init_calls.push(quote! {
-            #crate_root::#overlay_fields_macro!(@init);
+        view_overlay_field_inits.push(quote! {
+            #overlay_field_ident: ::std::default::Default::default(),
         });
 
         view_overlay_impl_macro_calls.push(quote! {
@@ -566,7 +562,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             // Dependency slots (top-level).
             #(#dep_field_defs,)*
             // Dependency overlays injected by views.
-            #(#view_overlay_field_def_calls)*
+            #(#view_overlay_field_defs)*
             // Weak self-reference for lazy builders.
             #[doc(hidden)]
             pub __weak_self: std::sync::Weak<Self>,
@@ -599,7 +595,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     secrets_fetch_id,
                     #(#dep_field_inits,)*
                     // Overlay fields initialised to None inside macro expansion.
-                    #(#view_overlay_field_init_calls)*
+                    #(#view_overlay_field_inits)*
                     __weak_self: weak.clone(),
                 });
 
@@ -715,7 +711,6 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
     // Macro/struct identifiers.
     let impl_macro = format_ident!("__impl_{}_for", view_name);
-    let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_name);
     let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_name);
     // Per-view overlay struct + its field on the parent ctx.
     let overlay_struct_name = format_ident!("__{}DepsOverlay", view_name);
@@ -813,7 +808,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .collect();
 
     quote! {
-        // View trait (signatures only).
+        // View trait.
         #[async_trait::async_trait]
         pub trait #view_name #super_traits {
             #(#env_sigs)*
@@ -821,7 +816,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             #(#dep_sigs)*
         }
 
-        // ==== impl macro ====
+        // View trait impl helper.
         #[macro_export]
         macro_rules! #impl_macro {
             ($ctx:ty) => {
@@ -834,31 +829,14 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             };
         }
 
-        // ==== overlay struct & field macro ====
         // Hidden per-view overlay struct; parent ctx keeps a single field of this.
-
         #[derive(Debug, Default)]
         #[doc(hidden)]
         pub struct #overlay_struct_name {
             #(#overlay_field_defs)*
         }
 
-        // Inject overlay field and default-init it.
-        #[macro_export]
-        macro_rules! #overlay_fields_macro {
-            // Definition site (struct fields).
-            () => {
-                #[doc(hidden)]
-                pub #overlay_field_ident: $crate::#overlay_struct_name,
-            };
-            // Initialiser site (struct literal).
-            (@init) => {
-                #overlay_field_ident: ::std::default::Default::default(),
-            };
-        }
-
-        // ==== overlay impl macro ====
-        // Adds getters/overrides + CtxHas* impls.
+        // Overlay impl helper.
         #[macro_export]
         macro_rules! #overlay_impls_macro {
             ($ctx:ty) => {
