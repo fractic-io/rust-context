@@ -630,6 +630,37 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         req_impl,
     } = input;
 
+    // Dependency aliases ───────────────────────────────────────
+    let mut alias_reexports = Vec::<TokenStream2>::new();
+    let dep_overlay_paths: Vec<_> = dep_overlays.iter().map(|d| d.trait_path.clone()).collect();
+
+    for trait_path in &dep_overlay_paths {
+        // Validate absolute path: ≥2 segments (crate::..., my_crate::..., etc.)
+        if trait_path.segments.len() < 2 {
+            let ident = last_ident(trait_path);
+            let msg = format!(
+                "dependency path `{}` must be an absolute path \
+                 (e.g. `crate::{}`), not a local identifier or re-export.",
+                ident, ident
+            );
+            alias_reexports.push(quote! { compile_error!(#msg); });
+            continue;
+        }
+
+        // Compute a deterministic alias for the parent module of the
+        // dependency's trait.
+        let trait_ident = last_ident(trait_path);
+        let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+
+        // Parent path == everything except the last segment.
+        let parent_path = path_prefix(trait_path);
+
+        // Export alias for deterministic access at crate root.
+        alias_reexports.push(quote! {
+            pub use #parent_path as #alias_mod_ident;
+        });
+    }
+
     // Signatures only ──────────────────────────────────────────
     let env_sigs: Vec<_> = env
         .iter()
@@ -717,8 +748,6 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     let overlay_field_ident = format_ident!("__{}_deps", to_snake(&view_name));
 
     // Generate struct field defs, getters, etc.
-    let dep_overlay_paths: Vec<_> = dep_overlays.iter().map(|d| d.trait_path.clone()).collect();
-    // Generate struct field defs, getters, etc.
     let overlay_field_defs: Vec<_> = dep_overlay_paths
         .iter()
         .map(|trait_path| {
@@ -733,9 +762,15 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             }
             let last = last_ident(trait_path);
             let field = to_snake(last);
+            let trait_ident = last_ident(trait_path);
+            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+
+            // Use $crate::__<snake>_mod::Trait instead of direct path.
+            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+
             quote! {
                 #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_path + Send + Sync>>>,
+                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>>>,
             }
         })
         .collect();
@@ -749,14 +784,15 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
             let default_fn_ident = format_ident!("__default_{}", field);
-            let prefix = path_prefix(trait_path);
-            let default_fn_path = if trait_path.segments.len() > 1 {
-                quote! { #prefix :: #default_fn_ident }
-            } else {
-                quote! { #default_fn_ident }
-            };
+            let trait_ident = last_ident(trait_path);
+            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+
+            // Use $crate::__<snake>_mod::Trait and $crate::__<snake>_mod::__default_* instead of direct paths.
+            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+            let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
+
             quote! {
-                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                     if let Some(existing) = {
                         let read = self.#overlay_field_ident.#field.read().await;
                         (*read).clone()
@@ -776,7 +812,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                     };
                     ::std::result::Result::Ok(arc)
                 }
-                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
+                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>) {
                     let mut lock = self.#overlay_field_ident.#field.write().await;
                     *lock = Some(new_impl);
                 }
@@ -790,16 +826,17 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let last = last_ident(trait_path);
             let getter = to_snake(last);
             let trait_ident_q = format_ident!("CtxHas{}", last);
-            let prefix = path_prefix(trait_path);
-            let ctxhas_path = if trait_path.segments.len() > 1 {
-                quote! { #prefix :: #trait_ident_q }
-            } else {
-                quote! { #trait_ident_q }
-            };
+            let trait_ident = last_ident(trait_path);
+            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+
+            // Use $crate::__<snake>_mod::CtxHas* and $crate::__<snake>_mod::Trait instead of direct paths.
+            let ctxhas_path = quote! { $crate::#alias_mod_ident::#trait_ident_q };
+            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+
             quote! {
                 #[async_trait::async_trait]
                 impl #ctxhas_path for $ctx {
-                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                         self.#getter().await
                     }
                 }
@@ -807,7 +844,10 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
+    // Assembly ────────────────────────────────────────────────
     quote! {
+        #(#alias_reexports)*
+
         // View trait.
         #[async_trait::async_trait]
         pub trait #view_name : Send + Sync #super_traits {
