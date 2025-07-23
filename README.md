@@ -19,13 +19,13 @@ Example
 use rust_context::define_ctx;
 
 define_ctx! {
-    name:    Ctx,
-    env      { PORT: u16 },
+    name: Ctx,
+    env { PORT: u16 },
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
-    secrets  { DB_URL: String },
-    deps     { crate::Database },
-    views    { my_lib::DbCtxView }
+    secrets { DB_URL: String },
+    deps { crate::Database },
+    views { my_lib::DbCtxView }
 }
 
 // Initialise once at startup.
@@ -35,17 +35,29 @@ let ctx = Ctx::init().await;
 use rust_context::define_ctx_view;
 
 define_ctx_view! {
-    name:    DbCtxView,
-    env      { PORT: u16 },
-    secrets  { DB_URL: String },
-    deps     { Database },
+    name: DbCtxView,
+    env { PORT: u16 },
+    secrets { DB_URL: String },
+    deps_overlay { crate::Database },
     req_impl { LoggingCtxView }
 }
 
 // ─── dependency registration ───────────────────────────────
 use rust_context::register_ctx_dependency;
 
-register_ctx_dependency!(Ctx, Database, |ctx: Arc<Ctx>| async move {
-    DatabaseImpl::new(&*ctx).await
-});
+register_ctx_dependency!(
+    Ctx, // in binary
+    Database,
+    |ctx: Arc<Ctx>| async move {
+        DatabaseImpl::new(&*ctx).await
+    }
+);
+
+register_ctx_dependency!(
+    dyn DbCtxView, // in library
+    Database,
+    |ctx: Arc<dyn DbCtxView>| async move {
+        DatabaseImpl::new(&*ctx).await
+    }
+);
 ```
