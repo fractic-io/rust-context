@@ -69,6 +69,16 @@ impl Parse for DepItem {
 }
 
 #[derive(Debug)]
+struct DepOverlayItem {
+    trait_path: Path,
+}
+impl Parse for DepOverlayItem {
+    fn parse(input: ParseStream) -> Result<Self> {
+        Path::parse_mod_style(input).map(|trait_path| DepOverlayItem { trait_path })
+    }
+}
+
+#[derive(Debug)]
 struct DefineCtxInput {
     ctx_name: Ident,
     env: Vec<KeyTy>,
@@ -90,7 +100,10 @@ impl Parse for DefineCtxInput {
         input.parse::<Token![,]>()?;
 
         // env { ... },
-        let _env_kw: Ident = input.parse()?;
+        let env_kw: Ident = input.parse()?;
+        if env_kw != "env" {
+            return Err(input.error("expected `env:`"));
+        }
         let env_content;
         braced!(env_content in input);
         let env_items: Punctuated<KeyTy, Token![,]> =
@@ -116,7 +129,10 @@ impl Parse for DefineCtxInput {
         input.parse::<Token![,]>()?;
 
         // secrets { ... },
-        let _sec_kw: Ident = input.parse()?;
+        let sec_kw: Ident = input.parse()?;
+        if sec_kw != "secrets" {
+            return Err(input.error("expected `secrets:`"));
+        }
         let sec_content;
         braced!(sec_content in input);
         let sec_items: Punctuated<KeyTy, Token![,]> =
@@ -124,7 +140,10 @@ impl Parse for DefineCtxInput {
         input.parse::<Token![,]>()?;
 
         // deps { ... },
-        let _deps_kw: Ident = input.parse()?;
+        let deps_kw: Ident = input.parse()?;
+        if deps_kw != "deps" {
+            return Err(input.error("expected `deps:`"));
+        }
         let deps_content;
         braced!(deps_content in input);
         let deps_items: Punctuated<DepItem, Token![,]> =
@@ -132,7 +151,10 @@ impl Parse for DefineCtxInput {
         input.parse::<Token![,]>()?;
 
         // views { ... }
-        let _views_kw: Ident = input.parse()?;
+        let views_kw: Ident = input.parse()?;
+        if views_kw != "views" {
+            return Err(input.error("expected `views:`"));
+        }
         let views_content;
         braced!(views_content in input);
         let views_items: Punctuated<Path, Token![,]> =
@@ -155,7 +177,7 @@ struct DefineCtxViewInput {
     view_name: Ident,
     env: Vec<KeyTy>,
     secrets: Vec<KeyTy>,
-    deps: Vec<Ident>,
+    dep_overlays: Vec<DepOverlayItem>,
     req_impl: Vec<Path>,
 }
 impl Parse for DefineCtxViewInput {
@@ -170,7 +192,10 @@ impl Parse for DefineCtxViewInput {
         input.parse::<Token![,]>()?;
 
         // env { .. }
-        let _env_kw: Ident = input.parse()?;
+        let env_kw: Ident = input.parse()?;
+        if env_kw != "env" {
+            return Err(input.error("expected `env:`"));
+        }
         let env_content;
         braced!(env_content in input);
         let env_items: Punctuated<KeyTy, Token![,]> =
@@ -178,23 +203,32 @@ impl Parse for DefineCtxViewInput {
         input.parse::<Token![,]>()?;
 
         // secrets { .. }
-        let _sec_kw: Ident = input.parse()?;
+        let sec_kw: Ident = input.parse()?;
+        if sec_kw != "secrets" {
+            return Err(input.error("expected `secrets:`"));
+        }
         let sec_content;
         braced!(sec_content in input);
         let sec_items: Punctuated<KeyTy, Token![,]> =
             sec_content.parse_terminated(KeyTy::parse, Token![,])?;
         input.parse::<Token![,]>()?;
 
-        // deps { .. }
-        let _deps_kw: Ident = input.parse()?;
+        // deps_overlay { .. }
+        let deps_kw: Ident = input.parse()?;
+        if deps_kw != "deps_overlay" {
+            return Err(input.error("expected `deps_overlay:`"));
+        }
         let deps_content;
         braced!(deps_content in input);
-        let dep_items: Punctuated<Ident, Token![,]> =
-            deps_content.parse_terminated(Ident::parse, Token![,])?;
+        let dep_items: Punctuated<DepOverlayItem, Token![,]> =
+            deps_content.parse_terminated(DepOverlayItem::parse, Token![,])?;
         input.parse::<Token![,]>()?;
 
         // req_impl { .. }
-        let _req_kw: Ident = input.parse()?;
+        let req_kw: Ident = input.parse()?;
+        if req_kw != "req_impl" {
+            return Err(input.error("expected `req_impl:`"));
+        }
         let req_content;
         braced!(req_content in input);
         let req_items: Punctuated<Path, Token![,]> =
@@ -204,7 +238,7 @@ impl Parse for DefineCtxViewInput {
             view_name,
             env: env_items.into_iter().collect(),
             secrets: sec_items.into_iter().collect(),
-            deps: dep_items.into_iter().collect(),
+            dep_overlays: dep_items.into_iter().collect(),
             req_impl: req_items.into_iter().collect(),
         })
     }
@@ -229,6 +263,115 @@ impl Parse for RegisterDepInput {
             builder,
         })
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Shared dep artifact generation (fields/getters/trait impl scaffolding).
+// Used for top-level deps and overlay deps alike.
+// ──────────────────────────────────────────────────────────────
+fn gen_dep_artifacts(
+    ctx_name: &Ident,
+    dep_paths: &[Path],
+) -> (
+    Vec<TokenStream2>, // field defs
+    Vec<TokenStream2>, // field inits
+    Vec<TokenStream2>, // getters + overrides (inherent impl fns)
+    Vec<TokenStream2>, // trait impls
+) {
+    let mut field_defs = Vec::new();
+    let mut field_inits = Vec::new();
+    let mut getters = Vec::new();
+    let mut trait_impls = Vec::new();
+
+    for trait_path in dep_paths {
+        // Validate absolute path: ≥2 segments (crate::..., my_crate::..., etc.)
+        if trait_path.segments.len() < 2 {
+            let ident = last_ident(trait_path);
+            let msg = format!(
+                "dependency path `{}` must be an absolute path \
+                 (e.g. `crate::{}`), not a local identifier or re-export.",
+                ident, ident
+            );
+            field_defs.push(quote! { compile_error!(#msg); });
+            continue;
+        }
+
+        let last = last_ident(trait_path);
+        let field = to_snake(last);
+        let getter = field.clone();
+        let override_fn = format_ident!("override_{}", field);
+
+        // helper names ----------------
+        let default_fn_ident = format_ident!("__default_{}", field);
+        let trait_ident_q = format_ident!("CtxHas{}", last);
+
+        let prefix = path_prefix(trait_path);
+
+        // Qualified symbols in dependency crate (must be pub or re-exported).
+        let default_fn_path = if trait_path.segments.len() > 1 {
+            quote! { #prefix :: #default_fn_ident }
+        } else {
+            quote! { #default_fn_ident }
+        };
+        let ctxhas_path = if trait_path.segments.len() > 1 {
+            quote! { #prefix :: #trait_ident_q }
+        } else {
+            quote! { #trait_ident_q }
+        };
+
+        field_defs.push(quote! {
+            #[doc(hidden)]
+            pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_path + Send + Sync>>>
+        });
+
+        field_inits.push(quote! {
+            #field: ::tokio::sync::RwLock::new(None)
+        });
+
+        getters.push(quote! {
+            pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                // Fast path – check without awaiting expensive build.
+                if let Some(existing) = {
+                    let read = self.#field.read().await;
+                    (*read).clone()
+                } {
+                    return ::std::result::Result::Ok(existing);
+                }
+
+                // Build the dependency outside of any locks to avoid deadlocks.
+                let ctx_arc = self.__weak_self
+                    .upgrade()
+                    .expect("Ctx weak ptr lost – this should never happen");
+                let built = #default_fn_path(ctx_arc).await?;
+
+                // Attempt to store the newly built instance, but respect races.
+                let mut write = self.#field.write().await;
+                let arc = if let Some(ref arc) = *write {
+                    arc.clone()
+                } else {
+                    write.replace(built.clone());
+                    built
+                };
+                ::std::result::Result::Ok(arc)
+            }
+
+            pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
+                let mut lock = self.#field.write().await;
+                *lock = Some(new_impl);
+            }
+        });
+
+        trait_impls.push(quote! {
+            #[async_trait::async_trait]
+            impl #ctxhas_path for #ctx_name {
+                async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                    self.#getter().await
+                }
+            }
+        });
+    }
+
+    (field_defs, field_inits, getters, trait_impls)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -359,149 +502,53 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         })
         .collect();
 
-    // ── Dependencies ─────────────────────────────────────────────────────
-    for dep in &deps {
-        if dep.trait_path.segments.len() < 2 {
-            let ident = last_ident(&dep.trait_path);
+    // ── Top-level Dependencies ──────────────────────────────────────────
+    let dep_paths: Vec<_> = deps.iter().map(|d| d.trait_path.clone()).collect();
+    let (dep_field_defs, dep_field_inits, dep_getters, dep_trait_impls) =
+        gen_dep_artifacts(&ctx_name, &dep_paths);
+
+    // ── View invocations ─────────────────────────────────────────────────
+    // For each supplied view path, we will:
+    //   1. insert overlay fields into struct via __overlay_fields_<View>!()
+    //   2. after struct + inherent impl, pull in overlay impls via __overlay_impls_<View>_for!(#ctx_name)
+    //   3. implement the view trait itself via __impl_<View>_for!(#ctx_name)
+    //
+    // We require absolute paths (≥2 segments) so we can qualify macros.
+    let mut view_overlay_field_macro_calls = Vec::<TokenStream2>::new();
+    let mut view_overlay_impl_macro_calls = Vec::<TokenStream2>::new();
+    let mut view_impl_macro_calls = Vec::<TokenStream2>::new();
+
+    for path in &views {
+        if path.segments.len() < 2 {
+            let view_ident = &path.segments.first().unwrap().ident;
             let msg = format!(
-                "`define_ctx!`: dependency path `{}` must be an absolute path \
-                 (e.g. `crate::{}`), not a local identifier or re-export.",
-                ident, ident
+                "`define_ctx!`: view path `{}` must be an absolute path (e.g. `my_crate::{}`), \
+                not a local identifier or brought into scope with a `use` statement.",
+                view_ident, view_ident
             );
-            return quote! { compile_error!(#msg); };
+            view_impl_macro_calls.push(quote! { compile_error!(#msg); });
+            continue;
         }
+        // Split into crate-root and final segment.
+        let crate_root = &path.segments.first().unwrap().ident;
+        let view_ident = &path.segments.last().unwrap().ident;
+
+        let impl_macro = format_ident!("__impl_{}_for", view_ident);
+        let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_ident);
+        let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_ident);
+
+        view_overlay_field_macro_calls.push(quote! {
+            #crate_root::#overlay_fields_macro!();
+        });
+
+        view_overlay_impl_macro_calls.push(quote! {
+            #crate_root::#overlay_impls_macro!(#ctx_name);
+        });
+
+        view_impl_macro_calls.push(quote! {
+            #crate_root::#impl_macro!(#ctx_name);
+        });
     }
-
-    let dep_field_defs: Vec<_> = deps
-        .iter()
-        .map(|d| {
-            let trait_path = &d.trait_path;
-            let last = last_ident(trait_path);
-            let field = to_snake(last);
-            quote! {
-                #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_path + Send + Sync>>>
-            }
-        })
-        .collect();
-
-    let dep_field_inits: Vec<_> = deps
-        .iter()
-        .map(|d| {
-            let last = last_ident(&d.trait_path);
-            let field = to_snake(last);
-            quote! { #field: ::tokio::sync::RwLock::new(None) }
-        })
-        .collect();
-
-    let dep_getters: Vec<_> = deps
-        .iter()
-        .map(|d| {
-            let trait_path = &d.trait_path;
-            let last = last_ident(trait_path);
-            let field = to_snake(last);
-            let getter = field.clone();
-            let override_fn = format_ident!("override_{}", field);
-
-            // helper names ----------------
-            let default_fn_ident = format_ident!("__default_{}", field);
-
-            let prefix = path_prefix(trait_path);
-
-            let default_fn_path = if trait_path.segments.len() > 1 {
-                quote! { #prefix :: #default_fn_ident }
-            } else {
-                quote! { #default_fn_ident }
-            };
-
-            quote! {
-                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
-                    // Fast path – check without awaiting expensive build.
-                    if let Some(existing) = {
-                        let read = self.#field.read().await;
-                        (*read).clone()
-                    } {
-                        return ::std::result::Result::Ok(existing);
-                    }
-
-                    // Build the dependency outside of any locks to avoid deadlocks.
-                    let ctx_arc = self.__weak_self
-                        .upgrade()
-                        .expect("Ctx weak ptr lost – this should never happen");
-                    let built = #default_fn_path(ctx_arc).await?;
-
-                    // Attempt to store the newly built instance, but respect races.
-                    let mut write = self.#field.write().await;
-                    let arc = if let Some(ref arc) = *write {
-                        arc.clone()
-                    } else {
-                        write.replace(built.clone());
-                        built
-                    };
-                    ::std::result::Result::Ok(arc)
-                }
-
-                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
-                    let mut lock = self.#field.write().await;
-                    *lock = Some(new_impl);
-                }
-            }
-        })
-        .collect();
-
-    let dep_trait_impls: Vec<_> = deps
-        .iter()
-        .map(|d| {
-            let trait_path = &d.trait_path;
-            let last = last_ident(trait_path);
-            let getter = to_snake(last);
-
-            // helper names ----------------
-            let trait_ident_q = format_ident!("CtxHas{}", last);
-            let prefix = path_prefix(trait_path);
-
-            let ctxhas_path = if trait_path.segments.len() > 1 {
-                quote! { #prefix :: #trait_ident_q }
-            } else {
-                quote! { #trait_ident_q }
-            };
-
-            quote! {
-                #[async_trait::async_trait]
-                impl #ctxhas_path for #ctx_name {
-                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
-                        self.#getter().await
-                    }
-                }
-            }
-        })
-        .collect();
-
-    // ── View impl-macro invocations ──────────────────────────────────────
-    let view_impl_macro_calls: Vec<_> = views
-        .iter()
-        .map(|path| {
-            // If the caller supplied a local path (e.g. `MyView`), we cannot
-            // know which crate exported the helper macro (`__impl_<View>_for`).
-            // Emit a dedicated error instead of rustc’s “partially resolved
-            // path in a macro”. Require absolute paths (e.g. `my_crate::MyView`).
-            if path.segments.len() < 2 {
-                let view_ident = &path.segments.first().unwrap().ident;
-                let msg = format!(
-                    "`define_ctx!`: view path `{}` must be an absolute path (e.g. `my_crate::{}`), \
-                    not a local identifier or brought into scope with a `use` statement.",
-                    view_ident, view_ident
-                );
-                quote! { compile_error!(#msg); }
-            } else {
-                // Split into crate-root and final segment.
-                let crate_root = &path.segments.first().unwrap().ident;
-                let view_ident = &path.segments.last().unwrap().ident;
-                let impl_macro = format_ident!("__impl_{}_for", view_ident);
-                quote! { #crate_root::#impl_macro!(#ctx_name); }
-            }
-        })
-        .collect();
 
     quote! {
         #[derive(Debug)]
@@ -511,8 +558,10 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             #(#secret_field_defs,)*
             pub secrets_fetch_region: String,
             pub secrets_fetch_id: String,
-            // Dependency slots.
+            // Dependency slots (top-level).
             #(#dep_field_defs,)*
+            // Dependency overlays injected by views.
+            #(#view_overlay_field_macro_calls)*
             // Weak self-reference for lazy builders.
             #[doc(hidden)]
             pub __weak_self: std::sync::Weak<Self>,
@@ -544,6 +593,12 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     secrets_fetch_region,
                     secrets_fetch_id,
                     #(#dep_field_inits,)*
+                    // Overlay fields initialised to None inside macro expansion.
+                    #(
+                        // Each overlay macro expands to `field: RwLock::new(None), ...`
+                        // A block is needed to place inside struct literal; macro emits plain toks.
+                        { #view_overlay_field_macro_calls }
+                    )*
                     __weak_self: weak.clone(),
                 });
 
@@ -551,17 +606,20 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             }
         }
 
-        // Inherent getters & overrides.
+        // Inherent getters & overrides (env, secrets, top-level deps).
         impl #ctx_name {
             #(#env_getters)*
             #(#secret_getters)*
             #(#dep_getters)*
         }
 
-        // Blanket accessor-trait impls.
+        // Blanket accessor-trait impls for top-level deps.
         #(#dep_trait_impls)*
 
-        // Bring in all view impls.
+        // Bring in all overlay impls (fields already expanded inside struct; these add getters + trait impls).
+        #(#view_overlay_impl_macro_calls)*
+
+        // Bring in all view impls (view traits).
         #(#view_impl_macro_calls)*
     }
 }
@@ -571,7 +629,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         view_name,
         env,
         secrets,
-        deps,
+        dep_overlays,
         req_impl,
     } = input;
 
@@ -594,12 +652,14 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
-    let dep_sigs: Vec<_> = deps
+    // Overlay deps signatures: use full Path (trait).
+    let dep_sigs: Vec<_> = dep_overlays
         .iter()
-        .map(|ident| {
-            let fn_name = to_snake(ident);
+        .map(|item| {
+            let trait_path = &item.trait_path;
+            let fn_name = to_snake(last_ident(trait_path));
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #ident + Send + Sync>, ::fractic_server_error::ServerError>;
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError>;
             }
         })
         .collect();
@@ -631,12 +691,14 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
-    let dep_impls: Vec<_> = deps
+    // Overlay dep impls for the view trait simply forward to inherent ctx getter that overlay macro will create.
+    let dep_impls: Vec<_> = dep_overlays
         .iter()
-        .map(|ident| {
-            let fn_name = to_snake(ident);
+        .map(|item| {
+            let trait_path = &item.trait_path;
+            let fn_name = to_snake(last_ident(trait_path));
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #ident + Send + Sync>, ::fractic_server_error::ServerError> {
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -650,8 +712,115 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         TokenStream2::new()
     };
 
-    // Impl macro identifier.
+    // Impl macros identifiers.
     let impl_macro = format_ident!("__impl_{}_for", view_name);
+    let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_name);
+    let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_name);
+
+    // Generate overlay artifacts (fields/getters/trait impls) to inject into parent ctx.
+    let dep_overlay_paths: Vec<_> = dep_overlays.iter().map(|d| d.trait_path.clone()).collect();
+    // Dummy ctx name for generation; we'll substitute `$ctx` ident in macro body, so we create
+    // temporary ident here but do *not* qualify; placeholders in macro body.
+    // We'll generate the artifacts now using a fake ident then macro-quote-replace by `$ctx`.
+    // Instead of hacky string replace, we inline generation per dep below referencing `$ctx`.
+    let overlay_field_defs: Vec<_> = dep_overlay_paths
+        .iter()
+        .map(|trait_path| {
+            // Validate absolute path.
+            if trait_path.segments.len() < 2 {
+                let ident = last_ident(trait_path);
+                let msg = format!(
+                    "`define_ctx_view!`: overlay dep path `{}` must be absolute (e.g. `crate::{}`)",
+                    ident, ident
+                );
+                return quote! { compile_error!(#msg); };
+            }
+            let last = last_ident(trait_path);
+            let field = to_snake(last);
+            quote! {
+                #[doc(hidden)]
+                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_path + Send + Sync>>>,
+            }
+        })
+        .collect();
+
+    let overlay_field_inits: Vec<_> = dep_overlay_paths
+        .iter()
+        .map(|trait_path| {
+            if trait_path.segments.len() < 2 {
+                return TokenStream2::new();
+            }
+            let last = last_ident(trait_path);
+            let field = to_snake(last);
+            quote! { #field: ::tokio::sync::RwLock::new(None), }
+        })
+        .collect();
+
+    let overlay_getters_impls: Vec<_> = dep_overlay_paths
+        .iter()
+        .map(|trait_path| {
+            let last = last_ident(trait_path);
+            let field = to_snake(last);
+            let getter = field.clone();
+            let override_fn = format_ident!("override_{}", field);
+            let default_fn_ident = format_ident!("__default_{}", field);
+            let prefix = path_prefix(trait_path);
+            let default_fn_path = if trait_path.segments.len() > 1 {
+                quote! { #prefix :: #default_fn_ident }
+            } else {
+                quote! { #default_fn_ident }
+            };
+            quote! {
+                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                    if let Some(existing) = {
+                        let read = self.#field.read().await;
+                        (*read).clone()
+                    } {
+                        return ::std::result::Result::Ok(existing);
+                    }
+                    let ctx_arc = self.__weak_self
+                        .upgrade()
+                        .expect("Ctx weak ptr lost – this should never happen");
+                    let built = #default_fn_path(ctx_arc).await?;
+                    let mut write = self.#field.write().await;
+                    let arc = if let Some(ref arc) = *write {
+                        arc.clone()
+                    } else {
+                        write.replace(built.clone());
+                        built
+                    };
+                    ::std::result::Result::Ok(arc)
+                }
+                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
+                    let mut lock = self.#field.write().await;
+                    *lock = Some(new_impl);
+                }
+            }
+        })
+        .collect();
+
+    let overlay_trait_impls: Vec<_> = dep_overlay_paths
+        .iter()
+        .map(|trait_path| {
+            let last = last_ident(trait_path);
+            let getter = to_snake(last);
+            let trait_ident_q = format_ident!("CtxHas{}", last);
+            let prefix = path_prefix(trait_path);
+            let ctxhas_path = if trait_path.segments.len() > 1 {
+                quote! { #prefix :: #trait_ident_q }
+            } else {
+                quote! { #trait_ident_q }
+            };
+            quote! {
+                #[async_trait::async_trait]
+                impl #ctxhas_path for $ctx {
+                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                        self.#getter().await
+                    }
+                }
+            }
+        })
+        .collect();
 
     quote! {
         // View trait (signatures only).
@@ -672,6 +841,44 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                     #(#secret_impls)*
                     #(#dep_impls)*
                 }
+            };
+        }
+
+        // ==== overlay field macro ====
+        //
+        // Expands to a comma-terminated list of struct field declarations *and*
+        // (when used inside a struct literal) the corresponding initialisers.
+        // Usage in parent ctx:
+        //   struct Ctx { ... #overlay_fields_macro!() ... }
+        //   let Ctx { ... #overlay_fields_macro!() ... }
+        //
+        // Because Rust macros cannot detect the syntactic position, we provide
+        // two arms: one for definition context, one for init context.
+        #[macro_export]
+        macro_rules! #overlay_fields_macro {
+            // Definition site (struct fields).
+            () => {
+                #(#overlay_field_defs)*
+            };
+            // Initialiser site (struct literal).
+            (@init) => {
+                #(#overlay_field_inits)*
+            };
+        }
+
+        // ==== overlay impl macro ====
+        //
+        // Brings in inherent getters/overrides + blanket CtxHas* impls for each overlay dep.
+        #[macro_export]
+        macro_rules! #overlay_impls_macro {
+            ($ctx:ty) => {
+                impl $ctx {
+                    #(#overlay_getters_impls)*
+                }
+                $(
+                    // Each overlay trait impl block.
+                    #overlay_trait_impls
+                )*
             };
         }
     }
