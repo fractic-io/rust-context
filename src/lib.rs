@@ -713,21 +713,17 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         TokenStream2::new()
     };
 
-    // Impl macros identifiers.
+    // Macro/struct identifiers.
     let impl_macro = format_ident!("__impl_{}_for", view_name);
     let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_name);
     let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_name);
-    // New: hidden overlay struct name and the field ident that will be inserted into the parent ctx.
+    // Per-view overlay struct + its field on the parent ctx.
     let overlay_struct_name = format_ident!("__{}DepsOverlay", view_name);
-    // Field name on the parent context that stores this overlay struct – use snake_case view name with suffix.
     let overlay_field_ident = format_ident!("__{}_deps", to_snake(&view_name));
 
-    // Generate overlay artifacts (fields/getters/trait impls) to inject into parent ctx.
+    // Generate struct field defs, getters, etc.
     let dep_overlay_paths: Vec<_> = dep_overlays.iter().map(|d| d.trait_path.clone()).collect();
-    // Dummy ctx name for generation; we'll substitute `$ctx` ident in macro body, so we create
-    // temporary ident here but do *not* qualify; placeholders in macro body.
-    // We'll generate the artifacts now using a fake ident then macro-quote-replace by `$ctx`.
-    // Instead of hacky string replace, we inline generation per dep below referencing `$ctx`.
+    // Generate struct field defs, getters, etc.
     let overlay_field_defs: Vec<_> = dep_overlay_paths
         .iter()
         .map(|trait_path| {
@@ -748,8 +744,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             }
         })
         .collect();
-    // We no longer need explicit field inits – the overlay struct derives Default which
-    // already initialises each RwLock<Option<_>> to its default (None).
+    // No explicit init: `Default` sets each lock to `None`.
 
     let overlay_getters_impls: Vec<_> = dep_overlay_paths
         .iter()
@@ -840,11 +835,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         }
 
         // ==== overlay struct & field macro ====
-        //
-        // We expose a hidden per-view overlay struct that actually stores all dependency
-        // slots. The parent context merely contains a single field of this struct. This
-        // avoids expanding individual fields directly inside the parent struct, which is
-        // not supported in Rust macros across crate boundaries.
+        // Hidden per-view overlay struct; parent ctx keeps a single field of this.
 
         #[derive(Debug, Default)]
         #[doc(hidden)]
@@ -852,8 +843,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             #(#overlay_field_defs)*
         }
 
-        // The following macro injects the overlay struct into the parent context
-        // and initialises it via `Default::default()` inside the constructor.
+        // Inject overlay field and default-init it.
         #[macro_export]
         macro_rules! #overlay_fields_macro {
             // Definition site (struct fields).
@@ -868,8 +858,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         }
 
         // ==== overlay impl macro ====
-        //
-        // Brings in inherent getters/overrides + blanket CtxHas* impls for each overlay dep.
+        // Adds getters/overrides + CtxHas* impls.
         #[macro_export]
         macro_rules! #overlay_impls_macro {
             ($ctx:ty) => {
