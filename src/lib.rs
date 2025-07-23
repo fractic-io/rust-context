@@ -360,20 +360,21 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .collect();
 
     // ── Dependencies ─────────────────────────────────────────────────────
+    for dep in &deps {
+        if dep.trait_path.segments.len() < 2 {
+            let ident = last_ident(&dep.trait_path);
+            let msg = format!(
+                "`define_ctx!`: dependency path `{}` must be an absolute path \
+                 (e.g. `crate::{}`), not a local identifier or re-export.",
+                ident, ident
+            );
+            return quote! { compile_error!(#msg); };
+        }
+    }
+
     let dep_field_defs: Vec<_> = deps
         .iter()
         .map(|d| {
-            if d.trait_path.segments.len() < 2 {
-                // Only a single identifier was given.
-                let ident = last_ident(&d.trait_path);
-                let msg = format!(
-                    "`define_ctx!`: dependency path `{}` must be an absolute path \
-                     (e.g. `crate::{}`), not a local identifier or re-export.",
-                    ident, ident
-                );
-                return quote! { compile_error!(#msg); };
-            }
-
             let trait_path = &d.trait_path;
             let last = last_ident(trait_path);
             let field = to_snake(last);
