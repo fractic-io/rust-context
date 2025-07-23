@@ -246,19 +246,19 @@ impl Parse for DefineCtxViewInput {
 
 #[derive(Debug)]
 struct RegisterDepInput {
-    ctx_ident: Ident,
+    ctx_ty: Type, // e.g. `MyCtx` or `dyn SomeCtxView`
     trait_path: Path,
     builder: Expr,
 }
 impl Parse for RegisterDepInput {
     fn parse(input: ParseStream) -> Result<Self> {
-        let ctx_ident: Ident = input.parse()?;
+        let ctx_ty: Type = input.parse()?;
         input.parse::<Token![,]>()?;
         let trait_path: Path = Path::parse_mod_style(input)?;
         input.parse::<Token![,]>()?;
         let builder: Expr = input.parse()?;
         Ok(RegisterDepInput {
-            ctx_ident,
+            ctx_ty,
             trait_path,
             builder,
         })
@@ -851,7 +851,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
 fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let RegisterDepInput {
-        ctx_ident,
+        ctx_ty,
         trait_path,
         builder,
     } = input;
@@ -876,7 +876,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
         // Default builder.
         #[doc(hidden)]
         pub(crate) async fn #default_fn(
-            ctx: std::sync::Arc<#ctx_ident>
+            ctx: std::sync::Arc<#ctx_ty>
         ) -> ::std::result::Result<
             std::sync::Arc<dyn #trait_path + Send + Sync>,
             ::fractic_server_error::ServerError
