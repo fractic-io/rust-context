@@ -19,6 +19,27 @@ fn to_snake(ident: &Ident) -> Ident {
     )
 }
 
+fn last_ident(path: &Path) -> &Ident {
+    &path.segments.last().unwrap().ident
+}
+
+fn path_prefix(path: &Path) -> TokenStream2 {
+    // `crate::rsc::tts::repositories`  (no trailing "::")
+    let mut ts = TokenStream2::new();
+    for (i, seg) in path.segments.iter().enumerate() {
+        if i + 1 == path.segments.len() {
+            break;
+        }
+        let id = &seg.ident;
+        if i == 0 {
+            ts.extend(quote! { #id });
+        } else {
+            ts.extend(quote! { :: #id });
+        }
+    }
+    ts
+}
+
 // ──────────────────────────────────────────────────────────────
 // Input ASTs.
 // ──────────────────────────────────────────────────────────────
@@ -38,13 +59,12 @@ impl Parse for KeyTy {
 
 #[derive(Debug)]
 struct DepItem {
-    trait_ident: Ident,
+    trait_path: Path, // e.g. crate::rsc::tts::repositories::TtsRepository
 }
 impl Parse for DepItem {
     fn parse(input: ParseStream) -> Result<Self> {
-        Ok(DepItem {
-            trait_ident: input.parse()?,
-        })
+        // `Path::parse_mod_style` understands `crate::…`, `self::…`, etc.
+        Path::parse_mod_style(input).map(|trait_path| DepItem { trait_path })
     }
 }
 
@@ -193,19 +213,19 @@ impl Parse for DefineCtxViewInput {
 #[derive(Debug)]
 struct RegisterDepInput {
     ctx_ident: Ident,
-    trait_ident: Ident,
+    trait_path: Path,
     builder: Expr,
 }
 impl Parse for RegisterDepInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let ctx_ident: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
-        let trait_ident: Ident = input.parse()?;
+        let trait_path: Path = Path::parse_mod_style(input)?;
         input.parse::<Token![,]>()?;
         let builder: Expr = input.parse()?;
         Ok(RegisterDepInput {
             ctx_ident,
-            trait_ident,
+            trait_path,
             builder,
         })
     }
@@ -343,11 +363,23 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_field_defs: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
+            if d.trait_path.segments.len() < 2 {
+                // Only a single identifier was given.
+                let ident = last_ident(&d.trait_path);
+                let msg = format!(
+                    "`define_ctx!`: dependency path `{}` must be an absolute path \
+                     (e.g. `crate::{}`), not a local identifier or re-export.",
+                    ident, ident
+                );
+                return quote! { compile_error!(#msg); };
+            }
+
+            let trait_path = &d.trait_path;
+            let last = last_ident(trait_path);
+            let field = to_snake(last);
             quote! {
                 #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #dep_trait + Send + Sync>>>
+                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_path + Send + Sync>>>
             }
         })
         .collect();
@@ -355,7 +387,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_field_inits: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
+            let last = last_ident(&d.trait_path);
+            let field = to_snake(last);
             quote! { #field: ::tokio::sync::RwLock::new(None) }
         })
         .collect();
@@ -363,13 +396,25 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_getters: Vec<_> = deps
         .iter()
         .map(|d| {
-            let field = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
+            let trait_path = &d.trait_path;
+            let last = last_ident(trait_path);
+            let field = to_snake(last);
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
-            let default_fn = format_ident!("__default_{}", field);
+
+            // helper names ----------------
+            let default_fn_ident = format_ident!("__default_{}", field);
+
+            let prefix = path_prefix(trait_path);
+
+            let default_fn_path = if trait_path.segments.len() > 1 {
+                quote! { #prefix :: #default_fn_ident }
+            } else {
+                quote! { #default_fn_ident }
+            };
+
             quote! {
-                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
+                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                     // Fast path – check without awaiting expensive build.
                     if let Some(existing) = {
                         let read = self.#field.read().await;
@@ -382,7 +427,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     let ctx_arc = self.__weak_self
                         .upgrade()
                         .expect("Ctx weak ptr lost – this should never happen");
-                    let built = #default_fn(ctx_arc).await?;
+                    let built = #default_fn_path(ctx_arc).await?;
 
                     // Attempt to store the newly built instance, but respect races.
                     let mut write = self.#field.write().await;
@@ -395,7 +440,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     ::std::result::Result::Ok(arc)
                 }
 
-                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #dep_trait + Send + Sync>) {
+                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
                     let mut lock = self.#field.write().await;
                     *lock = Some(new_impl);
                 }
@@ -406,13 +451,24 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let dep_trait_impls: Vec<_> = deps
         .iter()
         .map(|d| {
-            let trait_name = format_ident!("CtxHas{}", d.trait_ident);
-            let getter = to_snake(&d.trait_ident);
-            let dep_trait = &d.trait_ident;
+            let trait_path = &d.trait_path;
+            let last = last_ident(trait_path);
+            let getter = to_snake(last);
+
+            // helper names ----------------
+            let trait_ident_q = format_ident!("CtxHas{}", last);
+            let prefix = path_prefix(trait_path);
+
+            let ctxhas_path = if trait_path.segments.len() > 1 {
+                quote! { #prefix :: #trait_ident_q }
+            } else {
+                quote! { #trait_ident_q }
+            };
+
             quote! {
                 #[async_trait::async_trait]
-                impl #trait_name for #ctx_name {
-                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #dep_trait + Send + Sync>, ::fractic_server_error::ServerError> {
+                impl #ctxhas_path for #ctx_name {
+                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                         self.#getter().await
                     }
                 }
@@ -623,11 +679,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
     let RegisterDepInput {
         ctx_ident,
-        trait_ident,
+        trait_path,
         builder,
     } = input;
-    let field_snake = to_snake(&trait_ident);
-    let trait_name = format_ident!("CtxHas{}", trait_ident);
+    let last = last_ident(&trait_path);
+    let field_snake = to_snake(last);
+    let trait_name = format_ident!("CtxHas{}", last);
     let getter = field_snake.clone();
     let default_fn = format_ident!("__default_{}", field_snake);
 
@@ -638,7 +695,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
             async fn #getter(
                 &self
             ) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ident + Send + Sync>,
+                std::sync::Arc<dyn #trait_path + Send + Sync>,
                 ::fractic_server_error::ServerError
             >;
         }
@@ -648,7 +705,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
         pub(crate) async fn #default_fn(
             ctx: std::sync::Arc<#ctx_ident>
         ) -> ::std::result::Result<
-            std::sync::Arc<dyn #trait_ident + Send + Sync>,
+            std::sync::Arc<dyn #trait_path + Send + Sync>,
             ::fractic_server_error::ServerError
         > {
             let concrete = (#builder)(ctx).await?; // T

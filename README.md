@@ -24,7 +24,7 @@ define_ctx! {
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
     secrets  { DB_URL: String },
-    deps     { Database },
+    deps     { crate::Database },
     views    { my_lib::DbCtxView }
 }
 
