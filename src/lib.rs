@@ -724,9 +724,11 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .iter()
         .map(|item| {
             let trait_path = &item.trait_path;
-            let fn_name = to_snake(last_ident(trait_path));
+            let last = last_ident(trait_path);
+            let fn_name = to_snake(last);
+            let alias_mod = format_ident!("__{}_mod", to_snake(last));
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn $crate::#alias_mod::#last + Send + Sync>, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -765,12 +767,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let trait_ident = last_ident(trait_path);
             let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
 
-            // Use $crate::__<snake>_mod::Trait instead of direct path.
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+            // Use crate::__<snake>_mod::Trait instead of $crate for struct field definitions.
+            let wrapped_trait_path_field = quote! { crate::#alias_mod_ident::#trait_ident };
 
             quote! {
                 #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>>>,
+                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #wrapped_trait_path_field + Send + Sync>>>,
             }
         })
         .collect();
@@ -915,7 +917,7 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
 
         // Default builder.
         #[doc(hidden)]
-        pub(crate) async fn #default_fn(
+        pub async fn #default_fn(
             ctx: std::sync::Arc<#ctx_ty>
         ) -> ::std::result::Result<
             std::sync::Arc<dyn #trait_path + Send + Sync>,
