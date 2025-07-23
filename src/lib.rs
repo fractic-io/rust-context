@@ -717,6 +717,10 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     let impl_macro = format_ident!("__impl_{}_for", view_name);
     let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_name);
     let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_name);
+    // New: hidden overlay struct name and the field ident that will be inserted into the parent ctx.
+    let overlay_struct_name = format_ident!("__{}DepsOverlay", view_name);
+    // Field name on the parent context that stores this overlay struct – use snake_case view name with suffix.
+    let overlay_field_ident = format_ident!("__{}_deps", to_snake(&view_name));
 
     // Generate overlay artifacts (fields/getters/trait impls) to inject into parent ctx.
     let dep_overlay_paths: Vec<_> = dep_overlays.iter().map(|d| d.trait_path.clone()).collect();
@@ -744,18 +748,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             }
         })
         .collect();
-
-    let overlay_field_inits: Vec<_> = dep_overlay_paths
-        .iter()
-        .map(|trait_path| {
-            if trait_path.segments.len() < 2 {
-                return TokenStream2::new();
-            }
-            let last = last_ident(trait_path);
-            let field = to_snake(last);
-            quote! { #field: ::tokio::sync::RwLock::new(None), }
-        })
-        .collect();
+    // We no longer need explicit field inits – the overlay struct derives Default which
+    // already initialises each RwLock<Option<_>> to its default (None).
 
     let overlay_getters_impls: Vec<_> = dep_overlay_paths
         .iter()
@@ -774,7 +768,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             quote! {
                 pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
                     if let Some(existing) = {
-                        let read = self.#field.read().await;
+                        let read = self.#overlay_field_ident.#field.read().await;
                         (*read).clone()
                     } {
                         return ::std::result::Result::Ok(existing);
@@ -783,7 +777,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                         .upgrade()
                         .expect("Ctx weak ptr lost – this should never happen");
                     let built = #default_fn_path(ctx_arc).await?;
-                    let mut write = self.#field.write().await;
+                    let mut write = self.#overlay_field_ident.#field.write().await;
                     let arc = if let Some(ref arc) = *write {
                         arc.clone()
                     } else {
@@ -793,7 +787,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                     ::std::result::Result::Ok(arc)
                 }
                 pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #trait_path + Send + Sync>) {
-                    let mut lock = self.#field.write().await;
+                    let mut lock = self.#overlay_field_ident.#field.write().await;
                     *lock = Some(new_impl);
                 }
             }
@@ -845,25 +839,31 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             };
         }
 
-        // ==== overlay field macro ====
+        // ==== overlay struct & field macro ====
         //
-        // Expands to a comma-terminated list of struct field declarations *and*
-        // (when used inside a struct literal) the corresponding initialisers.
-        // Usage in parent ctx:
-        //   struct Ctx { ... #overlay_fields_macro!() ... }
-        //   let Ctx { ... #overlay_fields_macro!() ... }
-        //
-        // Because Rust macros cannot detect the syntactic position, we provide
-        // two arms: one for definition context, one for init context.
+        // We expose a hidden per-view overlay struct that actually stores all dependency
+        // slots. The parent context merely contains a single field of this struct. This
+        // avoids expanding individual fields directly inside the parent struct, which is
+        // not supported in Rust macros across crate boundaries.
+
+        #[derive(Debug, Default)]
+        #[doc(hidden)]
+        pub struct #overlay_struct_name {
+            #(#overlay_field_defs)*
+        }
+
+        // The following macro injects the overlay struct into the parent context
+        // and initialises it via `Default::default()` inside the constructor.
         #[macro_export]
         macro_rules! #overlay_fields_macro {
             // Definition site (struct fields).
             () => {
-                #(#overlay_field_defs)*
+                #[doc(hidden)]
+                pub #overlay_field_ident: $crate::#overlay_struct_name,
             };
             // Initialiser site (struct literal).
             (@init) => {
-                #(#overlay_field_inits)*
+                #overlay_field_ident: ::std::default::Default::default(),
             };
         }
 
