@@ -514,7 +514,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     //   3. implement the view trait itself via __impl_<View>_for!(#ctx_name)
     //
     // We require absolute paths (≥2 segments) so we can qualify macros.
-    let mut view_overlay_field_macro_calls = Vec::<TokenStream2>::new();
+    let mut view_overlay_field_def_calls = Vec::<TokenStream2>::new();
+    let mut view_overlay_field_init_calls = Vec::<TokenStream2>::new();
     let mut view_overlay_impl_macro_calls = Vec::<TokenStream2>::new();
     let mut view_impl_macro_calls = Vec::<TokenStream2>::new();
 
@@ -537,8 +538,12 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         let overlay_fields_macro = format_ident!("__overlay_fields_{}", view_ident);
         let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_ident);
 
-        view_overlay_field_macro_calls.push(quote! {
+        view_overlay_field_def_calls.push(quote! {
             #crate_root::#overlay_fields_macro!();
+        });
+
+        view_overlay_field_init_calls.push(quote! {
+            #crate_root::#overlay_fields_macro!(@init);
         });
 
         view_overlay_impl_macro_calls.push(quote! {
@@ -561,7 +566,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             // Dependency slots (top-level).
             #(#dep_field_defs,)*
             // Dependency overlays injected by views.
-            #(#view_overlay_field_macro_calls)*
+            #(#view_overlay_field_def_calls)*
             // Weak self-reference for lazy builders.
             #[doc(hidden)]
             pub __weak_self: std::sync::Weak<Self>,
@@ -594,11 +599,7 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     secrets_fetch_id,
                     #(#dep_field_inits,)*
                     // Overlay fields initialised to None inside macro expansion.
-                    #(
-                        // Each overlay macro expands to `field: RwLock::new(None), ...`
-                        // A block is needed to place inside struct literal; macro emits plain toks.
-                        { #view_overlay_field_macro_calls }
-                    )*
+                    #(#view_overlay_field_init_calls)*
                     __weak_self: weak.clone(),
                 });
 
@@ -875,10 +876,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 impl $ctx {
                     #(#overlay_getters_impls)*
                 }
-                $(
-                    // Each overlay trait impl block.
-                    #overlay_trait_impls
-                )*
+                #(#overlay_trait_impls)*
             };
         }
     }
