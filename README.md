@@ -30,7 +30,7 @@ define_ctx! {
         crate::ProcessorFactory,
         dyn crate::UserRepository,
     },
-    views { my_lib::DbCtxView }
+    views { db_lib::DbCtxView }
 }
 
 // Initialise once at startup.
@@ -46,7 +46,7 @@ define_ctx_view! {
     deps_overlay {
         dyn crate::Database
     },
-    req_impl { LoggingCtxView }
+    req_impl { log_lib::LoggingCtxView }
 }
 
 // ─── dependency registration ───────────────────────────────
