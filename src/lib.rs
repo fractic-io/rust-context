@@ -93,6 +93,16 @@ fn type_path_prefix(ty: &Type) -> TokenStream2 {
     }
 }
 
+/// true <=> `ty` is a single-segment path (e.g. `Foo` or `Foo<T>`), which we
+/// treat as *not* an absolute path for our macros.
+fn type_is_local(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Path(TypePath { qself: None, path })
+            if path.segments.len() < 2
+    )
+}
+
 // ──────────────────────────────────────────────────────────────
 // Input ASTs.
 // ──────────────────────────────────────────────────────────────
@@ -338,6 +348,21 @@ fn gen_dep_artifacts(
     let mut trait_impls = Vec::new();
 
     for trait_ty in dep_tys {
+        // ---------- absolute-path validation ----------
+        if type_is_local(trait_ty) {
+            let ident = type_ident_chain(trait_ty)
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format_ident!("_"));
+            let msg = format!(
+                "dependency path `{}` must be an absolute path \
+                 (e.g. `crate::{}::{}`), not a local identifier or re-export.",
+                ident, ident, ident
+            );
+            field_defs.push(quote! { compile_error!(#msg); });
+            continue;
+        }
+
         // identifiers for naming
         let chain = type_ident_chain(trait_ty);
         if chain.is_empty() {
@@ -685,6 +710,21 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     let dep_overlay_tys: Vec<_> = dep_overlays.iter().map(|d| d.trait_ty.clone()).collect();
 
     for trait_ty in &dep_overlay_tys {
+        // ---------- absolute-path validation ----------
+        if type_is_local(trait_ty) {
+            let bad = type_ident_chain(trait_ty)
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format_ident!("_"));
+            let msg = format!(
+                "`define_ctx_view!`: overlay dep path `{}` must be an absolute path \
+                 (e.g. `crate::{}::{}`)",
+                bad, bad, bad
+            );
+            alias_reexports.push(quote! { compile_error!(#msg); });
+            continue;
+        }
+
         // identifiers for naming
         let chain = type_ident_chain(trait_ty);
         if chain.is_empty() {
@@ -805,11 +845,19 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 return quote! { compile_error!("unsupported dependency type"); };
             }
             let field = chain_to_snake(&chain);
-            let trait_ident = &chain[0];
-            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
 
-            // Use crate::__<snake>_mod::Trait instead of $crate for struct field definitions.
-            let wrapped_trait_path_field = quote! { crate::#alias_mod_ident::#trait_ident };
+            // alias module
+            let main_ident          = &chain[0];
+            let alias_mod_ident     = format_ident!("__{}_mod", to_snake(main_ident));
+
+            // keep generic args by re-using the **full** last segment
+            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
+                path.segments.last().unwrap().clone()
+            } else {
+                unreachable!()
+            };
+            // crate::__foo_mod::RootCrud<…>
+            let wrapped_trait_path_field = quote! { crate::#alias_mod_ident::#last_seg };
 
             quote! {
                 #[doc(hidden)]
@@ -827,11 +875,14 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
             let default_fn_ident = format_ident!("__default_{}", field);
-            let trait_ident = &chain[0];
-            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+            let main_ident      = &chain[0];
+            let alias_mod_ident = format_ident!("__{}_mod", to_snake(main_ident));
 
-            // Use $crate::__<snake>_mod::Trait and $crate::__<snake>_mod::__default_* instead of direct paths.
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+            // keep generic args
+            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
+                path.segments.last().unwrap().clone()
+            } else { unreachable!() };
+            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
             let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
 
             quote! {
@@ -869,12 +920,16 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let chain = type_ident_chain(trait_ty);
             let getter = chain_to_snake(&chain);
             let trait_ident_q = format_ident!("CtxHas{}", chain_to_pascal(&chain));
-            let trait_ident = &chain[0];
-            let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+            let main_ident = &chain[0];
+            let alias_mod_ident = format_ident!("__{}_mod", to_snake(main_ident));
 
-            // Use $crate::__<snake>_mod::CtxHas* and $crate::__<snake>_mod::Trait instead of direct paths.
+            // keep generic args
+            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
+                path.segments.last().unwrap().clone()
+            } else { unreachable!() };
+
             let ctxhas_path = quote! { $crate::#alias_mod_ident::#trait_ident_q };
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#trait_ident };
+            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
 
             quote! {
                 #[async_trait::async_trait]
