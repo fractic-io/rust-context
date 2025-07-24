@@ -1398,12 +1398,19 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                 {
                     let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
                         let fut = builder(ctx, #( #arg_idents ),*);
-                        std::pin::Pin::from(Box::new(async move {
+                        Box::pin(async move {
                             let concrete: R = fut.await?;
                             let arc_concrete = std::sync::Arc::new(concrete);
                             let arc: #arc_ret_ty = arc_concrete; // unsize coercion
                             ::std::result::Result::Ok(arc)
-                        }))
+                        }) as std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                        Output = ::std::result::Result<#arc_ret_ty,
+                                                                       ::fractic_server_error::ServerError>
+                                    > + Send
+                                >
+                            >
                     };
                     Self { ctx, builder: std::sync::Arc::new(wrapped) }
                 }
@@ -1426,11 +1433,18 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                 {
                     let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
                         let fut = builder(ctx, #( #arg_idents ),*);
-                        std::pin::Pin::from(Box::new(async move {
+                        Box::pin(async move {
                             let concrete = fut.await?;
                             let arc = std::sync::Arc::new(concrete);
                             ::std::result::Result::Ok(arc)
-                        }))
+                        }) as std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                        Output = ::std::result::Result<#arc_ret_ty,
+                                                                       ::fractic_server_error::ServerError>
+                                    > + Send
+                                >
+                            >
                     };
                     Self { ctx, builder: std::sync::Arc::new(wrapped) }
                 }
