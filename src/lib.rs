@@ -1417,19 +1417,16 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
             }
         } else {
             quote! {
-                pub fn new<B>(
+                pub fn new<B, Fut>(
                     ctx: std::sync::Arc<#ctx_ty>,
                     builder: B
                 ) -> Self
                 where
-                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*)
-                         -> std::pin::Pin<
-                             Box<
-                                 dyn std::future::Future<Output =
-                                         ::std::result::Result<#type_ty, ::fractic_server_error::ServerError>>
-                                     + Send
-                             >
-                         > + Send + Sync + 'static,
+                    B: Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*) -> Fut
+                        + Send + Sync + 'static,
+                    Fut: std::future::Future<Output =
+                        ::std::result::Result<#type_ty, ::fractic_server_error::ServerError>
+                    > + Send + 'static,
                 {
                     let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
                         let fut = builder(ctx, #( #arg_idents ),*);
@@ -1440,7 +1437,8 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                         }) as std::pin::Pin<
                                 Box<
                                     dyn std::future::Future<
-                                        Output = ::std::result::Result<#arc_ret_ty,
+                                        Output =
+                                            ::std::result::Result<#arc_ret_ty,
                                                                        ::fractic_server_error::ServerError>
                                     > + Send
                                 >
