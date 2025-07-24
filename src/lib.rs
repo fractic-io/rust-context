@@ -734,8 +734,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
         // Compute a deterministic alias for the parent module of the
         // dependency's trait.
-        let trait_ident = &chain[0]; // main trait identifier
-        let alias_mod_ident = format_ident!("__{}_mod", to_snake(trait_ident));
+        let alias_snake = chain_to_snake(&chain);
+        let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
         // Parent path == everything except the last segment.
         let parent_path = type_path_prefix(trait_ty);
@@ -847,8 +847,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let field = chain_to_snake(&chain);
 
             // alias module
-            let main_ident          = &chain[0];
-            let alias_mod_ident     = format_ident!("__{}_mod", to_snake(main_ident));
+            let alias_snake = chain_to_snake(&chain);
+            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
             // keep generic args by re-using the **full** last segment
             let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
@@ -875,8 +875,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
             let default_fn_ident = format_ident!("__default_{}", field);
-            let main_ident      = &chain[0];
-            let alias_mod_ident = format_ident!("__{}_mod", to_snake(main_ident));
+            let alias_snake = chain_to_snake(&chain);
+            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
             // keep generic args
             let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
@@ -920,8 +920,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let chain = type_ident_chain(trait_ty);
             let getter = chain_to_snake(&chain);
             let trait_ident_q = format_ident!("CtxHas{}", chain_to_pascal(&chain));
-            let main_ident = &chain[0];
-            let alias_mod_ident = format_ident!("__{}_mod", to_snake(main_ident));
+            let alias_snake = chain_to_snake(&chain);
+            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
             // keep generic args
             let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
