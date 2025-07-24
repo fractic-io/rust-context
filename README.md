@@ -25,7 +25,11 @@ define_ctx! {
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
     secrets { DB_URL: String },
-    deps { crate::Database },
+    deps {
+        crate::Config,
+        crate::ProcessorFactory,
+        dyn crate::UserRepository,
+    },
     views { my_lib::DbCtxView }
 }
 
@@ -39,7 +43,9 @@ define_ctx_view! {
     name: DbCtxView,
     env { PORT: u16 },
     secrets { DB_URL: String },
-    deps_overlay { crate::Database },
+    deps_overlay {
+        dyn crate::Database
+    },
     req_impl { LoggingCtxView }
 }
 
@@ -68,12 +74,12 @@ register_ctx_singleton!(
     }
 );
 
-// ex. factory (accessible as `Arc<dyn DbSession>`).
+// ex. factory (generates `Arc<dyn Processor>` objects).
 register_ctx_factory!(
     Ctx, // or dyn SomeCtxView
-    DbSession,
+    dyn Processor,
     |ctx: Arc<Ctx>, user_id: Uuid| async move {
-        DbSession::new(&*ctx, user_id).await
+        ProcessorImpl::new(&*ctx, user_id).await
     }
-);
+); // -> ProcessorFactory
 ```
