@@ -53,14 +53,14 @@ use fractic_context::{
     register_ctx_factory,
 };
 
-// Async singleton `dyn Trait` registration
+// ex. `dyn Trait` singleton, w/ async constructor.
 register_ctx_trait_async!(
     Ctx,
     Database,
     |ctx: Arc<Ctx>| async move { DatabaseImpl::new(&*ctx).await }
 );
 
-// Sync singleton concrete struct registration
+// ex. concrete struct singleton, w/ sync constructor.
 register_ctx_struct!(
     Ctx,
     MetricsRegistry,
@@ -69,7 +69,7 @@ register_ctx_struct!(
     }
 );
 
-// Factory – every call returns a fresh instance
+// ex. factory – every call returns a fresh instance.
 register_ctx_factory!(
     Ctx,
     dyn DbCtxView,
