@@ -559,6 +559,7 @@ fn gen_dep_artifacts(
                 ::std::result::Result::Ok(arc)
             }
 
+            #[cfg(test)]
             pub async fn #override_ident(&self, new_impl: #getter_ret_ty) {
                 let mut lock = self.#field_ident.write().await;
                 *lock = Some(new_impl);
@@ -1125,6 +1126,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                     };
                     ::std::result::Result::Ok(arc)
                 }
+
+                #[cfg(test)]
                 pub async fn #override_fn(&self, new_impl: #return_ty) {
                     let mut lock = self.#overlay_field_ident.#field.write().await;
                     *lock = Some(new_impl);
