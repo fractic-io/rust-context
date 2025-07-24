@@ -1099,6 +1099,99 @@ fn gen_register_dep(input: RegisterDepInput) -> TokenStream2 {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Additional generators for newly introduced registration macros
+// ──────────────────────────────────────────────────────────────
+
+fn gen_register_trait_sync(input: RegisterDepInput) -> TokenStream2 {
+    let RegisterDepInput { ctx_ty, trait_ty, builder } = input;
+
+    let chain = type_ident_chain(&trait_ty);
+    let field_snake = chain_to_snake(&chain);
+    let trait_pascal = chain_to_pascal(&chain);
+
+    let trait_name = format_ident!("CtxHas{}", trait_pascal);
+    let getter = field_snake.clone();
+    let default_fn = format_ident!("__default_{}", field_snake);
+
+    quote! {
+        #[doc(hidden)]
+        #[async_trait::async_trait]
+        pub trait #trait_name {
+            async fn #getter(&self) -> ::std::result::Result<
+                std::sync::Arc<dyn #trait_ty + Send + Sync>,
+                ::fractic_server_error::ServerError
+            >;
+        }
+
+        #[doc(hidden)]
+        pub async fn #default_fn(
+            ctx: std::sync::Arc<#ctx_ty>
+        ) -> ::std::result::Result<
+            std::sync::Arc<dyn #trait_ty + Send + Sync>,
+            ::fractic_server_error::ServerError
+        > {
+            let concrete = (#builder)(ctx)?;
+            Ok(std::sync::Arc::new(concrete))
+        }
+    }
+}
+
+fn gen_register_struct_inner(input: RegisterDepInput, builder_is_async: bool) -> TokenStream2 {
+    let RegisterDepInput { ctx_ty, trait_ty, builder } = input;
+
+    let chain = type_ident_chain(&trait_ty);
+    let field_snake = chain_to_snake(&chain);
+    let trait_pascal = chain_to_pascal(&chain);
+
+    let trait_name = format_ident!("CtxHas{}", trait_pascal);
+    let getter = field_snake.clone();
+    let default_fn = format_ident!("__default_{}", field_snake);
+
+    let builder_call: TokenStream2 = if builder_is_async {
+        quote! { (#builder)(ctx).await? }
+    } else {
+        quote! { (#builder)(ctx)? }
+    };
+
+    quote! {
+        #[doc(hidden)]
+        #[async_trait::async_trait]
+        pub trait #trait_name {
+            async fn #getter(&self) -> ::std::result::Result<
+                std::sync::Arc<#trait_ty>,
+                ::fractic_server_error::ServerError
+            >;
+        }
+
+        #[doc(hidden)]
+        pub async fn #default_fn(
+            ctx: std::sync::Arc<#ctx_ty>
+        ) -> ::std::result::Result<
+            std::sync::Arc<#trait_ty>,
+            ::fractic_server_error::ServerError
+        > {
+            let concrete = #builder_call;
+            Ok(std::sync::Arc::new(concrete))
+        }
+    }
+}
+
+fn gen_register_struct_sync(input: RegisterDepInput) -> TokenStream2 {
+    gen_register_struct_inner(input, false)
+}
+
+fn gen_register_struct_async(input: RegisterDepInput) -> TokenStream2 {
+    gen_register_struct_inner(input, true)
+}
+
+/// Placeholder implementation: currently behaves like a trait async singleton.
+/// NOTE: real “factory” semantics (new instance per call) are not implemented yet.
+fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
+    // For now, fall back to async trait singleton semantics.
+    gen_register_dep(input)
+}
+
+// ──────────────────────────────────────────────────────────────
 // Public proc-macro entry points.
 // ──────────────────────────────────────────────────────────────
 #[proc_macro]
@@ -1114,7 +1207,52 @@ pub fn define_ctx_view(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn register_ctx_dependency(input: TokenStream) -> TokenStream {
+pub fn register_ctx_trait_async(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as RegisterDepInput);
     gen_register_dep(parsed).into()
+}
+
+#[proc_macro]
+pub fn register_ctx_trait(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    let gen_output = gen_register_trait_sync(parsed);
+    let mut output = TokenStream2::new();
+    output.extend(gen_output);
+    output.into()
+}
+
+#[proc_macro]
+pub fn register_ctx_struct(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    let gen_output = gen_register_struct_sync(parsed);
+    let mut output = TokenStream2::new();
+    output.extend(gen_output);
+    output.into()
+}
+
+#[proc_macro]
+pub fn register_ctx_struct_async(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    let gen_output = gen_register_struct_async(parsed);
+    let mut output = TokenStream2::new();
+    output.extend(gen_output);
+    output.into()
+}
+
+#[proc_macro]
+pub fn register_ctx_factory(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    let gen_output = gen_register_factory(parsed);
+    let mut output = TokenStream2::new();
+    output.extend(gen_output);
+    output.into()
+}
+
+#[proc_macro]
+pub fn register_ctx_trait_sync(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    let gen_output = gen_register_trait_sync(parsed);
+    let mut output = TokenStream2::new();
+    output.extend(gen_output);
+    output.into()
 }
