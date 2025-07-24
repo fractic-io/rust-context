@@ -1184,11 +1184,92 @@ fn gen_register_struct_async(input: RegisterDepInput) -> TokenStream2 {
     gen_register_struct_inner(input, true)
 }
 
-/// Placeholder implementation: currently behaves like a trait async singleton.
-/// NOTE: real “factory” semantics (new instance per call) are not implemented yet.
 fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
-    // For now, fall back to async trait singleton semantics.
-    gen_register_dep(input)
+    use syn::{Expr, ExprClosure, Pat, PatType};
+
+    let RegisterDepInput {
+        ctx_ty,
+        trait_ty,
+        builder,
+    } = input;
+
+    // Attempt to analyse the builder closure for extra arguments.
+    let (builder_is_async, extra_arg_types): (bool, Vec<_>) = match &builder {
+        Expr::Closure(ExprClosure {
+            asyncness,
+            inputs,
+            ..
+        }) => {
+            let mut tys = Vec::<Type>::new();
+
+            // Skip first input (assumed ctx)
+            for (idx, pat) in inputs.iter().enumerate() {
+                if idx == 0 {
+                    continue;
+                }
+
+                // Expect typed pattern to extract the explicit type.
+                if let Pat::Type(PatType { ty, .. }) = pat {
+                    tys.push((**ty).clone());
+                } else {
+                    // Unsupported pattern – emit a compile error.
+                    return quote! { compile_error!("Each builder argument must be of form `arg: Type`."); };
+                }
+            }
+
+            (asyncness.is_some(), tys)
+        }
+        _ => {
+            // Fallback: cannot analyse – zero args, assume async.
+            (true, Vec::new())
+        }
+    };
+
+    // Ident chains for naming.
+    let chain = type_ident_chain(&trait_ty);
+    let fn_snake = chain_to_snake(&chain);
+    let trait_pascal = chain_to_pascal(&chain);
+
+    let trait_name = format_ident!("CtxHas{}Factory", trait_pascal);
+    let getter = fn_snake.clone();
+
+    // Build arg identifiers (arg0, arg1, …)
+    let arg_idents: Vec<Ident> = (0..extra_arg_types.len())
+        .map(|i| format_ident!("arg{}", i))
+        .collect();
+
+    // Construct builder call tokens.
+    let builder_call = if builder_is_async {
+        quote! { (#builder)(ctx_arc, #( #arg_idents ),* ).await? }
+    } else {
+        quote! { (#builder)(ctx_arc, #( #arg_idents ),* )? }
+    };
+
+    // Generate code.
+    quote! {
+        // Trait definition -------------------------------------------------
+        #[async_trait::async_trait]
+        pub trait #trait_name {
+            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* ) -> ::std::result::Result<
+                std::sync::Arc<dyn #trait_ty + Send + Sync>,
+                ::fractic_server_error::ServerError
+            >;
+        }
+
+        // Trait implementation for `Arc<Ctx>` to avoid needing internal weak ptrs.
+        #[async_trait::async_trait]
+        impl #trait_name for std::sync::Arc<#ctx_ty> {
+            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* ) -> ::std::result::Result<
+                std::sync::Arc<dyn #trait_ty + Send + Sync>,
+                ::fractic_server_error::ServerError
+            > {
+                // Forward to helper builder
+                let ctx_arc = self.clone();
+                let concrete = #builder_call;
+                Ok(std::sync::Arc::new(concrete))
+            }
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
