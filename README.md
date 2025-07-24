@@ -78,8 +78,8 @@ register_ctx_singleton!(
 register_ctx_factory!(
     Ctx, // or dyn SomeCtxView
     dyn Processor,
-    |ctx: Arc<Ctx>, user_id: Uuid| async move {
-        ProcessorImpl::new(&*ctx, user_id).await
+    |ctx: Arc<Ctx>, user_id: Uuid| { // or async move { ... }
+        ProcessorImpl::new(&*ctx, user_id)
     }
 ); // -> ProcessorFactory
 ```
