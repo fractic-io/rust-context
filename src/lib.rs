@@ -1497,7 +1497,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         ::fractic_context::register_ctx_singleton!(
             #ctx_ty,
             #factory_id,
-            |ctx: std::sync::Arc<#ctx_ty>| async {
+            |ctx: std::sync::Arc<#ctx_ty>| async move {
                 ::std::result::Result::Ok(#factory_id::new(ctx.clone(), #builder))
             }
         );
