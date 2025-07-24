@@ -10,13 +10,14 @@ Macros
 ------
 * `define_ctx!` – emits a concrete `Ctx` with async `init`, getters and override helpers.
 * `define_ctx_view!` – emits a trait describing the subset of context a library needs.
-* `register_ctx_dependency!` – emits a `CtxHas*` accessor trait and a default async builder.
+* `register_ctx_singleton!` – registers a dependency accessed as `Arc<T>` or `Arc<dyn Trait>`.
+* `register_ctx_factory!` – registers a factory that builds a new `Arc<dyn Trait>` instance on every call (builder signature is mirrored by the generated getter).
 
 Example
 -------
 ```rust
 // ─── root crate ─────────────────────────────────────────────
-use rust_context::define_ctx;
+use fractic_context::define_ctx;
 
 define_ctx! {
     name: Ctx,
@@ -32,7 +33,7 @@ define_ctx! {
 let ctx = Ctx::init().await;
 
 // ─── library crate ──────────────────────────────────────────
-use rust_context::define_ctx_view;
+use fractic_context::define_ctx_view;
 
 define_ctx_view! {
     name: DbCtxView,
@@ -43,21 +44,36 @@ define_ctx_view! {
 }
 
 // ─── dependency registration ───────────────────────────────
-use rust_context::register_ctx_dependency;
+use fractic_context::{
+    register_ctx_factory,
+    register_ctx_struct,
+    register_ctx_trait_async,
+};
 
-register_ctx_dependency!(
-    Ctx, // in binary
-    Database,
+// ex. concrete struct singleton (accessible as `Arc<Config>`).
+register_ctx_singleton!(
+    Ctx, // or dyn SomeCtxView
+    Config,
+    |ctx: Arc<Ctx>| async move {
+        Config::new(&*ctx)
+    }
+);
+
+// ex. trait singleton (accessible as `Arc<dyn DbSession>`).
+register_ctx_singleton!(
+    Ctx, // or dyn SomeCtxView
+    dyn Database,
     |ctx: Arc<Ctx>| async move {
         DatabaseImpl::new(&*ctx).await
     }
 );
 
-register_ctx_dependency!(
-    dyn DbCtxView, // in library
-    Database,
-    |ctx: Arc<dyn DbCtxView>| async move {
-        DatabaseImpl::new(&*ctx).await
+// ex. factory (accessible as `Arc<dyn DbSession>`).
+register_ctx_factory!(
+    Ctx, // or dyn SomeCtxView
+    DbSession,
+    |ctx: Arc<Ctx>, user_id: Uuid| async move {
+        DbSession::new(&*ctx, user_id).await
     }
 );
 ```
