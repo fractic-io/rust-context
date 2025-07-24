@@ -762,8 +762,15 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     // `compile_error!`s for any invalid deps we filtered out above.
     view_impl_macro_calls.extend(dep_error_tokens);
 
+    // ── Custom std::fmt::Debug implementation ────────────────────────────
+    let debug_env_fields: Vec<_> = env.iter().map(|kv| to_snake(&kv.key)).collect();
+    let debug_secret_fields: Vec<_> = secrets.iter().map(|kv| to_snake(&kv.key)).collect();
+    let debug_dep_fields: Vec<_> = dep_tys
+        .iter()
+        .map(|ty| chain_to_snake(&type_ident_chain(ty)))
+        .collect();
+
     quote! {
-        #[derive(Debug)]
         pub struct #ctx_name {
             // Runtime settings.
             #(#env_field_defs,)*
@@ -829,6 +836,39 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
 
         // Bring in all view impls (view traits).
         #(#view_impl_macro_calls)*
+
+        impl std::fmt::Debug for #ctx_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut ds = f.debug_struct(stringify!(#ctx_name));
+
+                // ── Env vars ---------------------------------------------------
+                #(
+                    ds.field(stringify!(#debug_env_fields), &self.#debug_env_fields);
+                )*
+
+                // mandatory runtime config
+                ds.field("secrets_fetch_region", &self.secrets_fetch_region);
+                ds.field("secrets_fetch_id",     &self.secrets_fetch_id);
+
+                // ── Secrets (redacted) ----------------------------------------
+                #(
+                    ds.field(stringify!(#debug_secret_fields), &"<redacted>");
+                )*
+
+                // ── Dependencies – show only “loaded / not loaded” ------------
+                #(
+                    ds.field(
+                        stringify!(#debug_dep_fields),
+                        &self.#debug_dep_fields
+                            .try_read() // never blocks
+                            .map(|g| g.is_some()) // Result<bool, _>
+                            .unwrap_or(false), // poisoned → false
+                    );
+                )*
+
+                ds.finish()
+            }
+        }
     }
 }
 
@@ -1131,7 +1171,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
         // View trait.
         #[async_trait::async_trait]
-        pub trait #view_name : Send + Sync #super_traits {
+        pub trait #view_name : Send + Sync + std::fmt::Debug #super_traits {
             #(#env_sigs)*
             #(#secret_sigs)*
             #(#dep_sigs)*
@@ -1152,7 +1192,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         }
 
         // Hidden per-view overlay struct; parent ctx keeps a single field of this.
-        #[derive(Debug, Default)]
+        #[derive(Default)]
         #[doc(hidden)]
         pub struct #overlay_struct_name {
             #(#overlay_field_defs)*
