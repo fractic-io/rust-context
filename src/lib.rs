@@ -670,15 +670,27 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
-    // KV sections
-    let (_env_field_defs, _, env_getters, _) = gen_kv(KvSection {
-        items: &env,
-        init_tpl: |_kv| quote! {},
-    }); // getters only
-    let (_secret_field_defs, _, secret_getters, _) = gen_kv(KvSection {
-        items: &secrets,
-        init_tpl: |_kv| quote! {},
-    });
+    // body-ful, non-pub helpers for the *trait impl*
+    let env_impls: Vec<_> = env
+        .iter()
+        .map(|kv| {
+            let fn_name = to_snake(&kv.key);
+            let ty = &kv.ty;
+            quote! { fn #fn_name(&self) -> &#ty { &self.#fn_name } }
+        })
+        .collect();
+
+    let secret_impls: Vec<_> = secrets
+        .iter()
+        .map(|kv| {
+            let fn_name = to_snake(&kv.key);
+            let ty = &kv.ty;
+            quote! { fn #fn_name(&self) -> &#ty { &self.#fn_name } }
+        })
+        .collect();
+
+    // naming helpers (need overlay_field early)
+    let overlay_field = format_ident!("__{}_deps", to_snake(&view_name));
 
     // overlay struct fields
     let overlay_field_defs: Vec<_> = overlay_tys.iter().map(|trait_ty| {
@@ -703,7 +715,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let default_fn_ident = format_ident!("__default_{}", field_ident);
             let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
             gen_lazy_rwlock_getter(
-                quote! { self.#getter_ident() /* replaced later */ },
+                quote! { self.#overlay_field.#field_ident },
                 &wrapped_trait_ty,
                 default_fn_path,
                 &getter_ident,
@@ -758,6 +770,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         quote! { + #( #req_impl )+* }
     };
 
+    // dep impls for the trait impl
+    let dep_impls: Vec<_> = overlay_tys.iter().map(|trait_ty| {
+        let fn_name = concat_chain(&type_ident_chain(trait_ty), Case::Snake);
+        quote! { async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ty + Send + Sync>, ::fractic_server_error::ServerError> { self.#fn_name().await } }
+    }).collect();
+
     // naming helpers
     let impl_macro = format_ident!("__impl_{}_for", view_name);
     let overlay_macro = format_ident!("__overlay_impls_{}_for", view_name);
@@ -779,9 +797,9 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             ($ctx:ty) => {
                 #[async_trait::async_trait]
                 impl $crate::#view_name for $ctx {
-                    #(#env_getters)*
-                    #(#secret_getters)*
-                    #(#dep_sigs)* // placeholder – real impls added below
+                    #(#env_impls)*
+                    #(#secret_impls)*
+                    #(#dep_impls)*
                 }
             };
         }
