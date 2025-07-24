@@ -520,12 +520,12 @@ fn gen_dep_artifacts(
         };
         field_defs.push(quote! {
             #[doc(hidden)]
-            pub #field_ident: ::tokio::sync::RwLock<Option<#field_ty_tokens>>,
+            pub #field_ident: ::tokio::sync::RwLock<Option<#field_ty_tokens>>
         });
 
         // 2.  Field init (always `None`)
         field_inits.push(quote! {
-            #field_ident: ::tokio::sync::RwLock::new(None),
+            #field_ident: ::tokio::sync::RwLock::new(None)
         });
 
         // 3.  Getter + override on the context itself
@@ -977,7 +977,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             };
 
             let inner_ty = match dep_kind(trait_ty) {
-                DepKind::Trait  => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Trait  => quote! { std::sync::Arc<dyn $crate::#trait_alias_ident #trait_args + Send + Sync> },
                 DepKind::Struct => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args> },
             };
 
