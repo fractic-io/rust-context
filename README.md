@@ -62,7 +62,7 @@ register_ctx_singleton!(
 // ex. trait singleton (accessible as `Arc<dyn DbSession>`).
 register_ctx_singleton!(
     Ctx, // or dyn SomeCtxView
-    Database,
+    dyn Database,
     |ctx: Arc<Ctx>| async move {
         DatabaseImpl::new(&*ctx).await
     }
