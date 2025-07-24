@@ -1234,7 +1234,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
             asyncness, inputs, ..
         }) => {
             let mut v = Vec::new();
-            for (idx, p) in inputs.iter().enumerate().skip(1) {
+            for p in inputs.iter().skip(1) {
                 // skip the ctx
                 match p {
                     Pat::Type(PatType { ty, .. }) => v.push((**ty).clone()),
@@ -1252,10 +1252,8 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
 
     // ── derived identifiers ───────────────────────────────────────────────
     let chain = type_ident_chain(&type_ty);
-    let stem_snake = chain_to_snake(&chain); // export_processor
     let stem_pascal = chain_to_pascal(&chain); // ExportProcessor
     let factory_id = format_ident!("{stem_pascal}Factory");
-    let get_fn_id = format_ident!("{}_factory", stem_snake);
 
     // the Arc-wrapped return type
     let arc_ret_ty = match dep_kind(&type_ty) {
@@ -1301,7 +1299,9 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         ::fractic_context::register_ctx_singleton!(
             #ctx_ty,
             #factory_id,
-            |ctx: std::sync::Arc<#ctx_ty>| async { #factory_id::new(ctx) }
+            |ctx: std::sync::Arc<#ctx_ty>| async {
+                ::std::result::Result::Ok(#factory_id::new(ctx))
+            }
         );
     }
 }
