@@ -350,8 +350,8 @@ impl Parse for DefineCtxViewInput {
 
 #[derive(Debug)]
 struct RegisterDepInput {
-    ctx_ty: Type,   // e.g. `MyCtx` or `dyn SomeCtxView`
-    trait_ty: Type, // generic aware
+    ctx_ty: Type,  // e.g. `MyCtx` or `dyn SomeCtxView`
+    type_ty: Type, // generic aware
     builder: Expr,
 }
 impl Parse for RegisterDepInput {
@@ -363,7 +363,7 @@ impl Parse for RegisterDepInput {
         let builder: Expr = input.parse()?;
         Ok(RegisterDepInput {
             ctx_ty,
-            trait_ty,
+            type_ty: trait_ty,
             builder,
         })
     }
@@ -1060,14 +1060,14 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     }
 }
 
-fn gen_register_struct(input: RegisterDepInput, builder_is_async: bool) -> TokenStream2 {
+fn gen_register_singleton(input: RegisterDepInput, is_dyn: bool) -> TokenStream2 {
     let RegisterDepInput {
         ctx_ty,
-        trait_ty,
+        type_ty,
         builder,
     } = input;
 
-    let chain = type_ident_chain(&trait_ty);
+    let chain = type_ident_chain(&type_ty);
     let field_snake = chain_to_snake(&chain);
     let trait_pascal = chain_to_pascal(&chain);
 
@@ -1075,10 +1075,10 @@ fn gen_register_struct(input: RegisterDepInput, builder_is_async: bool) -> Token
     let getter = field_snake.clone();
     let default_fn = format_ident!("__default_{}", field_snake);
 
-    let builder_call: TokenStream2 = if builder_is_async {
-        quote! { (#builder)(ctx).await? }
+    let wrapped_type_ty = if is_dyn {
+        quote! { dyn #type_ty + Send + Sync }
     } else {
-        quote! { (#builder)(ctx)? }
+        quote! { #type_ty }
     };
 
     quote! {
@@ -1086,7 +1086,7 @@ fn gen_register_struct(input: RegisterDepInput, builder_is_async: bool) -> Token
         #[async_trait::async_trait]
         pub trait #trait_name {
             async fn #getter(&self) -> ::std::result::Result<
-                std::sync::Arc<#trait_ty>,
+                std::sync::Arc<#wrapped_type_ty>,
                 ::fractic_server_error::ServerError
             >;
         }
@@ -1095,54 +1095,10 @@ fn gen_register_struct(input: RegisterDepInput, builder_is_async: bool) -> Token
         pub async fn #default_fn(
             ctx: std::sync::Arc<#ctx_ty>
         ) -> ::std::result::Result<
-            std::sync::Arc<#trait_ty>,
+            std::sync::Arc<#wrapped_type_ty>,
             ::fractic_server_error::ServerError
         > {
-            let concrete = #builder_call;
-            Ok(std::sync::Arc::new(concrete))
-        }
-    }
-}
-
-fn gen_register_trait(input: RegisterDepInput, builder_is_async: bool) -> TokenStream2 {
-    let RegisterDepInput {
-        ctx_ty,
-        trait_ty,
-        builder,
-    } = input;
-
-    let chain = type_ident_chain(&trait_ty);
-    let field_snake = chain_to_snake(&chain);
-    let trait_pascal = chain_to_pascal(&chain);
-
-    let trait_name = format_ident!("CtxHas{}", trait_pascal);
-    let getter = field_snake.clone();
-    let default_fn = format_ident!("__default_{}", field_snake);
-
-    let builder_call: TokenStream2 = if builder_is_async {
-        quote! { (#builder)(ctx).await? }
-    } else {
-        quote! { (#builder)(ctx)? }
-    };
-
-    quote! {
-        #[doc(hidden)]
-        #[async_trait::async_trait]
-        pub trait #trait_name {
-            async fn #getter(&self) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ty + Send + Sync>,
-                ::fractic_server_error::ServerError
-            >;
-        }
-
-        #[doc(hidden)]
-        pub async fn #default_fn(
-            ctx: std::sync::Arc<#ctx_ty>
-        ) -> ::std::result::Result<
-            std::sync::Arc<dyn #trait_ty + Send + Sync>,
-            ::fractic_server_error::ServerError
-        > {
-            let concrete = #builder_call;
+            let concrete = (#builder)(ctx).await?;
             Ok(std::sync::Arc::new(concrete))
         }
     }
@@ -1153,7 +1109,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
 
     let RegisterDepInput {
         ctx_ty,
-        trait_ty,
+        type_ty: trait_ty,
         builder,
     } = input;
 
@@ -1250,27 +1206,15 @@ pub fn define_ctx_view(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn register_ctx_struct(input: TokenStream) -> TokenStream {
+pub fn register_ctx_singleton_struct(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_struct(parsed, false).into()
+    gen_register_singleton(parsed, false).into()
 }
 
 #[proc_macro]
-pub fn register_ctx_struct_async(input: TokenStream) -> TokenStream {
+pub fn register_ctx_singleton_trait(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_struct(parsed, true).into()
-}
-
-#[proc_macro]
-pub fn register_ctx_trait(input: TokenStream) -> TokenStream {
-    let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_trait(parsed, false).into()
-}
-
-#[proc_macro]
-pub fn register_ctx_trait_async(input: TokenStream) -> TokenStream {
-    let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_trait(parsed, true).into()
+    gen_register_singleton(parsed, true).into()
 }
 
 #[proc_macro]
