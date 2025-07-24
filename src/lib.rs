@@ -43,7 +43,7 @@ fn type_ident_chain(ty: &Type) -> Vec<Ident> {
     let mut out = Vec::<Ident>::new();
 
     match ty {
-        // ── the old path case ───────────────────────────────────────────
+        // e.g. `crate::foo::Bar`
         Type::Path(TypePath { qself: None, path }) => {
             if let Some(last) = path.segments.last() {
                 out.push(last.ident.clone());
@@ -60,7 +60,7 @@ fn type_ident_chain(ty: &Type) -> Vec<Ident> {
             }
         }
 
-        // ── `dyn Foo<Bar>`  ─────────────────────────────────────────────
+        // e.g. `dyn crate::foo::Bar`
         Type::TraitObject(TypeTraitObject { bounds, .. }) => {
             // Use **only the first** trait bound for naming.
             for b in bounds {
@@ -113,41 +113,79 @@ fn chain_to_pascal(idents: &[Ident]) -> Ident {
 /// Everything except the final path segment (works fine even if the last
 /// segment has generics).
 fn type_path_prefix(ty: &Type) -> TokenStream2 {
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        path_prefix(path)
-    } else {
-        TokenStream2::new()
+    match ty {
+        // e.g. `crate::foo::Bar`
+        Type::Path(TypePath { qself: None, path }) => path_prefix(path),
+
+        // e.g. `dyn crate::foo::Bar`
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => bounds
+            .iter()
+            .find_map(|b| match b {
+                TypeParamBound::Trait(tb) => Some(path_prefix(&tb.path)),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        _ => TokenStream2::new(),
     }
 }
 
 /// true <=> `ty` is a single-segment path (e.g. `Foo` or `Foo<T>`), which we
 /// treat as *not* an absolute path for our macros.
 fn type_is_local(ty: &Type) -> bool {
-    // Treat *anything* that is *not* a plain, absolute type-path
-    // (e.g. `Foo`, `&T`, `Box<dyn Bar>`, tuples, etc.) as "local".
     match ty {
+        // e.g. `crate::foo::Bar`
         Type::Path(TypePath { qself: None, path }) => path.segments.len() < 2,
+
+        // e.g. `dyn crate::foo::Bar`
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => bounds.iter().all(|b| {
+            match b {
+                TypeParamBound::Trait(tb) => tb.path.segments.len() < 2,
+                _ => true, // lifetime bounds don't change locality
+            }
+        }),
+
+        // everything else (`&T`, tuples, …) – treat as local
         _ => true,
     }
 }
 
 /// Return the last segment of a type path, including generic arguments.
 fn last_ident(ty: &Type) -> PathSegment {
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        path.segments.last().unwrap().clone()
-    } else {
-        unreachable!("Expected Type::Path in last_ident");
+    match ty {
+        // e.g. `crate::foo::Bar`
+        Type::Path(TypePath { qself: None, path }) => path.segments.last().unwrap().clone(),
+
+        // e.g. `dyn crate::foo::Bar`
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => bounds
+            .iter()
+            .find_map(|b| match b {
+                TypeParamBound::Trait(tb) => tb.path.segments.last().cloned(),
+                _ => None,
+            })
+            .expect("Trait object without a trait bound"),
+
+        _ => unreachable!("Unsupported type in last_ident"),
     }
 }
 
 /// An absolute-path dependency type is something we can safely introspect with
 /// `Type::Path` *and* that already starts at the crate root (≥ 2 segments).
 fn is_absolute_dep_ty(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Path(TypePath { qself: None, path })
-            if path.segments.len() >= 2
-    )
+    match ty {
+        // e.g. `crate::foo::Bar`
+        Type::Path(TypePath { qself: None, path }) => path.segments.len() >= 2,
+
+        // e.g. `dyn crate::foo::Bar`
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => bounds.iter().any(|b| {
+            if let TypeParamBound::Trait(tb) = b {
+                tb.path.segments.len() >= 2
+            } else {
+                false
+            }
+        }),
+
+        _ => false,
+    }
 }
 
 /// Collect a list of *valid* dependency types while *also* generating
@@ -976,12 +1014,15 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 syn::PathArguments::AngleBracketed(g) => quote! { #g },
                 _ => quote! {},
             };
-            // crate::__foo_trait<…>
-            let wrapped_trait_path_field = quote! { crate::#trait_alias_ident #trait_args };
+
+            let inner_ty = match dep_kind(trait_ty) {
+                DepKind::Trait  => quote! { std::sync::Arc<dyn crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Struct => quote! { std::sync::Arc<crate::#trait_alias_ident #trait_args> },
+            };
 
             quote! {
                 #[doc(hidden)]
-                pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #wrapped_trait_path_field + Send + Sync>>>,
+                pub #field: ::tokio::sync::RwLock<Option<#inner_ty>>,
             }
         })
         .collect();
@@ -1003,11 +1044,16 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 syn::PathArguments::AngleBracketed(g) => quote! { #g },
                 _ => quote! {},
             };
-            let wrapped_trait_path = quote! { $crate::#trait_alias_ident #trait_args };
+
+            let return_ty = match dep_kind(trait_ty) {
+                DepKind::Trait  => quote! { std::sync::Arc<dyn $crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Struct => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args> },
+            };
+
             let default_fn_path = quote! { $crate::#default_fn_alias };
 
             quote! {
-                pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                pub async fn #getter(&self) -> ::std::result::Result<#return_ty, ::fractic_server_error::ServerError> {
                     if let Some(existing) = {
                         let read = self.#overlay_field_ident.#field.read().await;
                         (*read).clone()
@@ -1027,7 +1073,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                     };
                     ::std::result::Result::Ok(arc)
                 }
-                pub async fn #override_fn(&self, new_impl: std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>) {
+                pub async fn #override_fn(&self, new_impl: #return_ty) {
                     let mut lock = self.#overlay_field_ident.#field.write().await;
                     *lock = Some(new_impl);
                 }
@@ -1050,13 +1096,17 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 _ => quote! {},
             };
 
+            let return_ty = match dep_kind(trait_ty) {
+                DepKind::Trait  => quote! { std::sync::Arc<dyn $crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Struct => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args> },
+            };
+
             let ctxhas_path = quote! { $crate::#ctxhas_alias };
-            let wrapped_trait_path = quote! { $crate::#trait_alias_ident #trait_args };
 
             quote! {
                 #[async_trait::async_trait]
                 impl #ctxhas_path for $ctx {
-                    async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
+                    async fn #getter(&self) -> ::std::result::Result<#return_ty, ::fractic_server_error::ServerError> {
                         self.#getter().await
                     }
                 }
