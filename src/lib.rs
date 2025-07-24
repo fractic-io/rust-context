@@ -3,10 +3,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::PathSegment;
 use syn::{
     braced, parse_macro_input, punctuated::Punctuated, Expr, GenericArgument, Ident, Path,
-    PathArguments, Result, Token, Type, TypePath,
+    PathArguments, PathSegment, Result, Token, Type, TypeParamBound, TypePath, TypeTraitObject,
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -43,23 +42,50 @@ fn path_prefix(path: &Path) -> TokenStream2 {
 fn type_ident_chain(ty: &Type) -> Vec<Ident> {
     let mut out = Vec::<Ident>::new();
 
-    if let Type::Path(TypePath { qself: None, path }) = ty {
-        // main part
-        if let Some(last) = path.segments.last() {
-            out.push(last.ident.clone());
+    match ty {
+        // ── the old path case ───────────────────────────────────────────
+        Type::Path(TypePath { qself: None, path }) => {
+            if let Some(last) = path.segments.last() {
+                out.push(last.ident.clone());
 
-            // generics (depth-1)
-            if let PathArguments::AngleBracketed(abga) = &last.arguments {
-                for arg in &abga.args {
-                    if let GenericArgument::Type(Type::Path(tp)) = arg {
-                        if let Some(id) = tp.path.segments.last() {
-                            out.push(id.ident.clone());
+                if let PathArguments::AngleBracketed(abga) = &last.arguments {
+                    for arg in &abga.args {
+                        if let GenericArgument::Type(Type::Path(tp)) = arg {
+                            if let Some(id) = tp.path.segments.last() {
+                                out.push(id.ident.clone());
+                            }
                         }
                     }
                 }
             }
         }
+
+        // ── `dyn Foo<Bar>`  ─────────────────────────────────────────────
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => {
+            // Use **only the first** trait bound for naming.
+            for b in bounds {
+                if let TypeParamBound::Trait(tb) = b {
+                    if let Some(last) = tb.path.segments.last() {
+                        out.push(last.ident.clone());
+
+                        if let PathArguments::AngleBracketed(abga) = &last.arguments {
+                            for arg in &abga.args {
+                                if let GenericArgument::Type(Type::Path(tp)) = arg {
+                                    if let Some(id) = tp.path.segments.last() {
+                                        out.push(id.ident.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break; // we are done – ignore `+ Send + Sync` etc.
+                }
+            }
+        }
+
+        _ => {} // everything else → leave `out` empty
     }
+
     out
 }
 
@@ -141,6 +167,19 @@ fn collect_valid_dep_tys<'a>(
             }
         })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+enum DepKind {
+    Trait,  // e.g. `dyn crate::FooRepository`
+    Struct, // e.g. `crate::Config`
+}
+
+fn dep_kind(ty: &Type) -> DepKind {
+    match ty {
+        Type::TraitObject(_) => DepKind::Trait,
+        _ => DepKind::Struct,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -373,15 +412,18 @@ impl Parse for RegisterDepInput {
 // Shared dep artifact generation (fields/getters/trait impl scaffolding).
 // Used for top-level deps and overlay deps alike.
 // ──────────────────────────────────────────────────────────────
+/// Shared artefact generation (fields / getters / overrides / CtxHas impls)
+/// that now honours the difference between *trait* and *struct* dependencies.
 fn gen_dep_artifacts(
     ctx_name: &Ident,
     dep_tys: &[Type],
 ) -> (
     Vec<TokenStream2>, // field defs
     Vec<TokenStream2>, // field inits
-    Vec<TokenStream2>, // getters + overrides (inherent impl fns)
-    Vec<TokenStream2>, // trait impls
-) {
+    Vec<TokenStream2>, // inherent getters + overrides
+    Vec<TokenStream2>,
+) // `impl CtxHas… for Ctx`
+{
     let mut field_defs = Vec::new();
     let mut field_inits = Vec::new();
     let mut getters = Vec::new();
@@ -403,21 +445,20 @@ fn gen_dep_artifacts(
             continue;
         }
 
-        // identifiers for naming
+        // ---------- identifiers ----------
         let chain = type_ident_chain(trait_ty);
         if chain.is_empty() {
             field_defs.push(quote! { compile_error!("unsupported dependency type"); });
             continue;
         }
 
-        let field = chain_to_snake(&chain);
-        let getter = field.clone();
-        let override_fn = format_ident!("override_{}", field);
+        let field_ident = chain_to_snake(&chain); // `tts_repository`
+        let getter_ident = field_ident.clone(); // same as field
+        let override_ident = format_ident!("override_{}", field_ident);
 
-        // helper identifiers
-        let default_fn_ident = format_ident!("__default_{}", field);
-        let trait_ident_q = format_ident!("CtxHas{}", chain_to_pascal(&chain));
-
+        // helpers that already existed
+        let default_fn_ident = format_ident!("__default_{}", field_ident);
+        let ctxhas_ident = format_ident!("CtxHas{}", chain_to_pascal(&chain));
         let prefix = type_path_prefix(trait_ty);
 
         let default_fn_path = if !prefix.is_empty() {
@@ -426,38 +467,50 @@ fn gen_dep_artifacts(
             quote! { #default_fn_ident }
         };
         let ctxhas_path = if !prefix.is_empty() {
-            quote! { #prefix :: #trait_ident_q }
+            quote! { #prefix :: #ctxhas_ident }
         } else {
-            quote! { #trait_ident_q }
+            quote! { #ctxhas_ident }
         };
 
-        // ---- emit exactly the same code as before, but with `trait_ty` + new names ----
+        // ---------- kind-specific code ----------
+        let kind = dep_kind(trait_ty);
+
+        // 1.  Field definition
+        let field_ty_tokens = match kind {
+            DepKind::Trait => quote! { std::sync::Arc<dyn #trait_ty + Send + Sync> },
+            DepKind::Struct => quote! { std::sync::Arc<#trait_ty> },
+        };
         field_defs.push(quote! {
             #[doc(hidden)]
-            pub #field: ::tokio::sync::RwLock<Option<std::sync::Arc<dyn #trait_ty + Send + Sync>>>
+            pub #field_ident: ::tokio::sync::RwLock<Option<#field_ty_tokens>>,
         });
-        field_inits.push(quote! { #field: ::tokio::sync::RwLock::new(None) });
+
+        // 2.  Field init (always `None`)
+        field_inits.push(quote! {
+            #field_ident: ::tokio::sync::RwLock::new(None),
+        });
+
+        // 3.  Getter + override on the context itself
+        let getter_ret_ty = field_ty_tokens.clone(); // same as field type
         getters.push(quote! {
-            pub async fn #getter(&self) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ty + Send + Sync>,
+            pub async fn #getter_ident(&self) -> ::std::result::Result<
+                #getter_ret_ty,
                 ::fractic_server_error::ServerError
             > {
-                // Fast path – check without awaiting expensive build.
                 if let Some(existing) = {
-                    let read = self.#field.read().await;
+                    let read = self.#field_ident.read().await;
                     (*read).clone()
                 } {
                     return ::std::result::Result::Ok(existing);
                 }
-
-                // Build the dependency outside of any locks to avoid deadlocks.
+                // build outside any lock
                 let ctx_arc = self.__weak_self
                     .upgrade()
                     .expect("Ctx weak ptr lost – this should never happen");
                 let built = #default_fn_path(ctx_arc).await?;
 
-                // Attempt to store the newly built instance, but respect races.
-                let mut write = self.#field.write().await;
+                // store – be race-aware
+                let mut write = self.#field_ident.write().await;
                 let arc = if let Some(ref arc) = *write {
                     arc.clone()
                 } else {
@@ -466,26 +519,27 @@ fn gen_dep_artifacts(
                 };
                 ::std::result::Result::Ok(arc)
             }
-            pub async fn #override_fn(
-                &self,
-                new_impl: std::sync::Arc<dyn #trait_ty + Send + Sync>
-            ) {
-                let mut lock = self.#field.write().await;
+
+            pub async fn #override_ident(&self, new_impl: #getter_ret_ty) {
+                let mut lock = self.#field_ident.write().await;
                 *lock = Some(new_impl);
             }
         });
+
+        // 4.  Blanket `CtxHas…` impl
         trait_impls.push(quote! {
             #[async_trait::async_trait]
             impl #ctxhas_path for #ctx_name {
-                async fn #getter(&self) -> ::std::result::Result<
-                    std::sync::Arc<dyn #trait_ty + Send + Sync>,
+                async fn #getter_ident(&self) -> ::std::result::Result<
+                    #getter_ret_ty,
                     ::fractic_server_error::ServerError
                 > {
-                    self.#getter().await
+                    self.#getter_ident().await
                 }
             }
         });
     }
+
     (field_defs, field_inits, getters, trait_impls)
 }
 
@@ -1060,7 +1114,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     }
 }
 
-fn gen_register_singleton(input: RegisterDepInput, is_dyn: bool) -> TokenStream2 {
+fn gen_register_singleton(input: RegisterDepInput) -> TokenStream2 {
     let RegisterDepInput {
         ctx_ty,
         type_ty,
@@ -1075,10 +1129,11 @@ fn gen_register_singleton(input: RegisterDepInput, is_dyn: bool) -> TokenStream2
     let getter = field_snake.clone();
     let default_fn = format_ident!("__default_{}", field_snake);
 
-    let wrapped_type_ty = if is_dyn {
-        quote! { dyn #type_ty + Send + Sync }
-    } else {
-        quote! { #type_ty }
+    let wrapped_type_ty = match dep_kind(&type_ty) {
+        // written as `dyn crate::Foo`  → keep it
+        DepKind::Trait => quote! { #type_ty + Send + Sync },
+        // any plain path (struct or trait)  → treat as concrete type
+        DepKind::Struct => quote! { #type_ty },
     };
 
     quote! {
@@ -1206,15 +1261,9 @@ pub fn define_ctx_view(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn register_ctx_singleton_struct(input: TokenStream) -> TokenStream {
+pub fn register_ctx_singleton(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_singleton(parsed, false).into()
-}
-
-#[proc_macro]
-pub fn register_ctx_singleton_trait(input: TokenStream) -> TokenStream {
-    let parsed = parse_macro_input!(input as RegisterDepInput);
-    gen_register_singleton(parsed, true).into()
+    gen_register_singleton(parsed).into()
 }
 
 #[proc_macro]

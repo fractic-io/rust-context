@@ -10,8 +10,7 @@ Macros
 ------
 * `define_ctx!` – emits a concrete `Ctx` with async `init`, getters and override helpers.
 * `define_ctx_view!` – emits a trait describing the subset of context a library needs.
-* `register_ctx_singleton_struct!` – registers a concrete dependency accessed as `Arc<T>`.
-* `register_ctx_singleton_trait!` – registers a `dyn Trait` dependency accessed as `Arc<dyn Trait>`.
+* `register_ctx_singleton!` – registers a dependency accessed as `Arc<T>` or `Arc<dyn Trait>`.
 * `register_ctx_factory!` – registers a factory that builds a new `Arc<dyn Trait>` instance on every call (builder signature is mirrored by the generated getter).
 
 Example
@@ -51,24 +50,27 @@ use fractic_context::{
     register_ctx_trait_async,
 };
 
-register_ctx_singleton_struct!(
-    Ctx,
+// ex. concrete struct singleton (accessible as `Arc<Config>`).
+register_ctx_singleton!(
+    Ctx, // or dyn SomeCtxView
     Config,
     |ctx: Arc<Ctx>| async move {
         Config::new(&*ctx)
     }
 );
 
-register_ctx_singleton_trait!(
-    Ctx,
+// ex. trait singleton (accessible as `Arc<dyn DbSession>`).
+register_ctx_singleton!(
+    Ctx, // or dyn SomeCtxView
     Database,
     |ctx: Arc<Ctx>| async move {
         DatabaseImpl::new(&*ctx).await
     }
 );
 
+// ex. factory (accessible as `Arc<dyn DbSession>`).
 register_ctx_factory!(
-    dyn DbCtxView,
+    Ctx, // or dyn SomeCtxView
     DbSession,
     |ctx: Arc<Ctx>, user_id: Uuid| async move {
         DbSession::new(&*ctx, user_id).await
