@@ -515,7 +515,7 @@ fn gen_dep_artifacts(
 
         // 1.  Field definition
         let field_ty_tokens = match kind {
-            DepKind::Trait => quote! { std::sync::Arc<dyn #trait_ty + Send + Sync> },
+            DepKind::Trait => quote! { std::sync::Arc<#trait_ty + Send + Sync> },
             DepKind::Struct => quote! { std::sync::Arc<#trait_ty> },
         };
         field_defs.push(quote! {
@@ -924,8 +924,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .map(|trait_ty| {
             let chain = type_ident_chain(trait_ty);
             let fn_name = chain_to_snake(&chain);
+            let inner_ty = match dep_kind(trait_ty) {
+                DepKind::Trait => quote! { std::sync::Arc<#trait_ty + Send + Sync> },
+                DepKind::Struct => quote! { std::sync::Arc<#trait_ty> },
+            };
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ty + Send + Sync>, ::fractic_server_error::ServerError>;
+                async fn #fn_name(&self) -> ::std::result::Result<#inner_ty, ::fractic_server_error::ServerError>;
             }
         })
         .collect();
@@ -972,8 +976,13 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 _ => quote! {},
             };
 
+            let inner_ty = match dep_kind(trait_ty) {
+                DepKind::Trait  => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Struct => quote! { std::sync::Arc<$crate::#trait_alias_ident #trait_args> },
+            };
+
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn $crate::#trait_alias_ident #trait_args + Send + Sync>, ::fractic_server_error::ServerError> {
+                async fn #fn_name(&self) -> ::std::result::Result<#inner_ty, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -1016,7 +1025,9 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             };
 
             let inner_ty = match dep_kind(trait_ty) {
-                DepKind::Trait  => quote! { std::sync::Arc<dyn crate::#trait_alias_ident #trait_args + Send + Sync> },
+                DepKind::Trait => {
+                    quote! { std::sync::Arc<dyn crate::#trait_alias_ident #trait_args + Send + Sync> }
+                }
                 DepKind::Struct => quote! { std::sync::Arc<crate::#trait_alias_ident #trait_args> },
             };
 
