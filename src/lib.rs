@@ -63,10 +63,18 @@ fn type_ident_chain(ty: &Type) -> Vec<Ident> {
 
 /// Concatenate a chain with a chosen case.
 fn concat_chain(idents: &[Ident], case: Case) -> Ident {
-    let combined = idents
-        .iter()
-        .map(|id| id.to_string().to_case(case))
-        .collect::<String>();
+    let combined = if case == Case::Snake {
+        idents
+            .iter()
+            .map(|id| id.to_string().to_case(case))
+            .collect::<Vec<_>>()
+            .join("_")
+    } else {
+        idents
+            .iter()
+            .map(|id| id.to_string().to_case(case))
+            .collect::<String>()
+    };
     format_ident!("{}", combined)
 }
 
@@ -99,9 +107,7 @@ fn dep_path_error(bad: &Ident, ctx: &str) -> TokenStream2 {
 /// Helper: generate the async getter + override pair that lazily initialises a
 /// dependency wrapped in `RwLock<Option<Arc<..>>>`.
 fn gen_lazy_rwlock_getter(
-    ctx_name: &Ident,
-    field_path: TokenStream2,      // self.foo or self.__bar_deps.baz
-    field_lock_path: TokenStream2, // same but without `self.` (for struct field def)
+    field_path: TokenStream2, // self.foo or self.__bar_deps.baz
     trait_ty: &Type,
     default_fn_path: TokenStream2,
     getter_ident: &Ident,
@@ -465,9 +471,7 @@ fn gen_dep_artifacts(
 
         // getters & override via generic helper
         getters.push(gen_lazy_rwlock_getter(
-            ctx_name,
             quote! { self.#field_ident },
-            quote! { #field_ident },
             trait_ty,
             default_fn_path,
             &getter_ident,
@@ -667,13 +671,13 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .collect();
 
     // KV sections
-    let (env_field_defs, _, env_getters, _) = gen_kv(KvSection {
+    let (_env_field_defs, _, env_getters, _) = gen_kv(KvSection {
         items: &env,
-        init_tpl: |kv| quote! {},
+        init_tpl: |_kv| quote! {},
     }); // getters only
-    let (secret_field_defs, _, secret_getters, _) = gen_kv(KvSection {
+    let (_secret_field_defs, _, secret_getters, _) = gen_kv(KvSection {
         items: &secrets,
-        init_tpl: |kv| quote! {},
+        init_tpl: |_kv| quote! {},
     });
 
     // overlay struct fields
@@ -695,14 +699,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let getter_ident = field_ident.clone();
             let alias_mod_ident = format_ident!("__{}_mod", concat_chain(&chain, Case::Snake));
             let last = last_ident(trait_ty);
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last };
+            let wrapped_trait_ty: syn::Type = parse_quote!(crate::#alias_mod_ident::#last);
             let default_fn_ident = format_ident!("__default_{}", field_ident);
             let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
             gen_lazy_rwlock_getter(
-                &view_name, // dummy
-                quote! { self.#getter_ident() /* will be replaced in macro expander */ },
-                quote! { /* not used */ },
-                &parse_quote!(#wrapped_trait_path),
+                quote! { self.#getter_ident() /* replaced later */ },
+                &wrapped_trait_ty,
                 default_fn_path,
                 &getter_ident,
             )
