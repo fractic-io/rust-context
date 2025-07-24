@@ -1,13 +1,13 @@
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens as _};
 use syn::parse::{Parse, ParseStream};
 use syn::{
     braced, parse_macro_input, punctuated::Punctuated, Expr, GenericArgument, Ident, Path,
     PathArguments, PathSegment, Result, Token, Type, TypeParamBound, TypePath, TypeTraitObject,
 };
-use syn::{ExprClosure, Pat, PatType};
+use syn::{ExprClosure, Pat, PatIdent, PatType};
 
 // ──────────────────────────────────────────────────────────────
 // Helpers.
@@ -1269,34 +1269,50 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
     } = input;
 
     // ── inspect the supplied builder closure ──────────────────────────────
-    let (is_async, extra_tys): (bool, Vec<Type>) = match &builder {
+    fn fallback_arg_ident(idx: usize) -> Ident {
+        format_ident!("arg{}", idx)
+    }
+    let (is_async, arg_idents, arg_types): (bool, Vec<Ident>, Vec<TokenStream2>) = match &builder {
         Expr::Closure(ExprClosure {
             asyncness, inputs, ..
         }) => {
-            let mut extras = Vec::new();
+            let mut ids = Vec::new();
+            let mut tys = Vec::new();
+
             // inputs: (ctx, arg0, arg1, …)  → skip ctx
-            for p in inputs.iter().skip(1) {
+            for (idx, p) in inputs.iter().skip(1).enumerate() {
                 match p {
-                    Pat::Type(PatType { ty, .. }) => extras.push((**ty).clone()),
+                    // e.g.   |db: &Db|
+                    Pat::Type(PatType { pat, ty, .. }) => {
+                        if let Pat::Ident(PatIdent { ident, .. }) = pat.as_ref() {
+                            ids.push(ident.clone());
+                        } else {
+                            ids.push(fallback_arg_ident(idx));
+                        }
+                        tys.push(ty.to_token_stream());
+                    }
+                    // e.g.   |db|
+                    Pat::Ident(PatIdent { ident, .. }) => {
+                        ids.push(ident.clone());
+                        tys.push(quote! { _ });
+                    }
+                    // anything else: `|_|`, `|&(x, y)|`, …
                     _ => {
-                        return quote! { compile_error!(
-                            "each builder arg must be written `name: Type`"
-                        ); };
+                        ids.push(fallback_arg_ident(idx));
+                        tys.push(quote! { _ });
                     }
                 }
             }
-            (asyncness.is_some(), extras)
+
+            (asyncness.is_some(), ids, tys)
         }
-        _ => (true, Vec::new()),
+        _ => (true, Vec::new(), Vec::new()),
     };
 
     // ── helper identifiers ───────────────────────────────────────────────
     let chain = type_ident_chain(&type_ty);
     let stem_pascal = chain_to_pascal(&chain);
     let factory_id = format_ident!("{stem_pascal}Factory");
-    let arg_ids: Vec<Ident> = (0..extra_tys.len())
-        .map(|i| format_ident!("arg{i}"))
-        .collect();
 
     // ── return-type tokens for the public API ────────────────────────────
     let (arc_ret_ty, bound_trait_path, is_trait_dep) = match dep_kind(&type_ty) {
@@ -1333,7 +1349,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         quote! {
             std::sync::Arc<
                 dyn Fn(
-                    std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
+                    std::sync::Arc<#ctx_ty>, #( #arg_types ),*
                 ) -> std::pin::Pin<
                     Box<
                         dyn std::future::Future<
@@ -1347,7 +1363,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         quote! {
             std::sync::Arc<
                 dyn Fn(
-                    std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
+                    std::sync::Arc<#ctx_ty>, #( #arg_types ),*
                 ) -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
                 + Send + Sync
             >
@@ -1365,15 +1381,15 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                     builder: B
                 ) -> Self
                 where
-                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*) -> Fut
+                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*) -> Fut
                          + Send + Sync + 'static,
                     Fut: std::future::Future<Output =
                             ::std::result::Result<R, ::fractic_server_error::ServerError>>
                          + Send + 'static,
                     R  : #bound_trait_path + Send + Sync + 'static,
                 {
-                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                        let fut = builder(ctx, #( #arg_ids ),*);
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
+                        let fut = builder(ctx, #( #arg_idents ),*);
                         std::pin::Pin::from(Box::new(async move {
                             let concrete: R = fut.await?;
                             let arc_concrete = std::sync::Arc::new(concrete);
@@ -1391,7 +1407,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                     builder: B
                 ) -> Self
                 where
-                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*)
                          -> std::pin::Pin<
                              Box<
                                  dyn std::future::Future<Output =
@@ -1400,8 +1416,8 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                              >
                          > + Send + Sync + 'static,
                 {
-                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                        let fut = builder(ctx, #( #arg_ids ),*);
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
+                        let fut = builder(ctx, #( #arg_idents ),*);
                         std::pin::Pin::from(Box::new(async move {
                             let concrete = fut.await?;
                             let arc = std::sync::Arc::new(concrete);
@@ -1420,13 +1436,13 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                     builder: B
                 ) -> Self
                 where
-                    B: Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                    B: Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*)
                          -> ::std::result::Result<R, ::fractic_server_error::ServerError>
                          + Send + Sync + 'static,
                     R: #bound_trait_path + Send + Sync + 'static,
                 {
-                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                        builder(ctx, #( #arg_ids ),*).map(|concrete: R| {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
+                        builder(ctx, #( #arg_idents ),*).map(|concrete: R| {
                             let arc_concrete = std::sync::Arc::new(concrete);
                             let arc: #arc_ret_ty = arc_concrete; // unsize coercion
                             arc
@@ -1442,12 +1458,12 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                     builder: B
                 ) -> Self
                 where
-                    B: Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                    B: Fn(std::sync::Arc<#ctx_ty>, #( #arg_types ),*)
                          -> ::std::result::Result<#type_ty, ::fractic_server_error::ServerError>
                          + Send + Sync + 'static,
                 {
-                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                        builder(ctx, #( #arg_ids ),*).map(|concrete| {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_idents : #arg_types ),*| {
+                        builder(ctx, #( #arg_idents ),*).map(|concrete| {
                             std::sync::Arc::new(concrete)
                         })
                     };
@@ -1462,18 +1478,18 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
     // ---------------------------------------------------------------------
     let build_fn = if is_async {
         quote! {
-            pub async fn build(&self #( , #arg_ids : #extra_tys )* )
+            pub async fn build(&self #( , #arg_idents : #arg_types )* )
                 -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
             {
-                (self.builder)(self.ctx.clone(), #( #arg_ids ),*).await
+                (self.builder)(self.ctx.clone(), #( #arg_idents ),*).await
             }
         }
     } else {
         quote! {
-            pub fn build(&self #( , #arg_ids : #extra_tys )* )
+            pub fn build(&self #( , #arg_idents : #arg_types )* )
                 -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
             {
-                (self.builder)(self.ctx.clone(), #( #arg_ids ),* )
+                (self.builder)(self.ctx.clone(), #( #arg_idents ),* )
             }
         }
     };
