@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
+use syn::PathSegment;
 use syn::{
     braced, parse_macro_input, punctuated::Punctuated, Expr, GenericArgument, Ident, Path,
     PathArguments, Result, Token, Type, TypePath,
@@ -101,6 +102,15 @@ fn type_is_local(ty: &Type) -> bool {
         Type::Path(TypePath { qself: None, path })
             if path.segments.len() < 2
     )
+}
+
+/// Return the last segment of a type path, including generic arguments.
+fn last_ident(ty: &Type) -> PathSegment {
+    if let Type::Path(TypePath { qself: None, path }) = ty {
+        path.segments.last().unwrap().clone()
+    } else {
+        unreachable!("Expected Type::Path in last_ident");
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -813,8 +823,11 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let trait_ty = &item.trait_ty;
             let chain = type_ident_chain(trait_ty);
             let fn_name = chain_to_snake(&chain);
+            let alias_snake = chain_to_snake(&chain);
+            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
+            let last_seg = last_ident(trait_ty);
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn #trait_ty + Send + Sync>, ::fractic_server_error::ServerError> {
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn $crate::#alias_mod_ident::#last_seg + Send + Sync>, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -850,12 +863,8 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let alias_snake = chain_to_snake(&chain);
             let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
-            // keep generic args by re-using the **full** last segment
-            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
-                path.segments.last().unwrap().clone()
-            } else {
-                unreachable!()
-            };
+            // keep generic args
+            let last_seg = last_ident(trait_ty);
             // crate::__foo_mod::RootCrud<…>
             let wrapped_trait_path_field = quote! { crate::#alias_mod_ident::#last_seg };
 
@@ -879,9 +888,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
             // keep generic args
-            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
-                path.segments.last().unwrap().clone()
-            } else { unreachable!() };
+            let last_seg = last_ident(trait_ty);
             let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
             let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
 
@@ -924,9 +931,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
 
             // keep generic args
-            let last_seg = if let Type::Path(TypePath{qself:None, path}) = trait_ty {
-                path.segments.last().unwrap().clone()
-            } else { unreachable!() };
+            let last_seg = last_ident(trait_ty);
 
             let ctxhas_path = quote! { $crate::#alias_mod_ident::#trait_ident_q };
             let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
