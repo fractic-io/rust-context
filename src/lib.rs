@@ -97,11 +97,12 @@ fn type_path_prefix(ty: &Type) -> TokenStream2 {
 /// true <=> `ty` is a single-segment path (e.g. `Foo` or `Foo<T>`), which we
 /// treat as *not* an absolute path for our macros.
 fn type_is_local(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Path(TypePath { qself: None, path })
-            if path.segments.len() < 2
-    )
+    // Treat *anything* that is *not* a plain, absolute type-path
+    // (e.g. `Foo`, `&T`, `Box<dyn Bar>`, tuples, etc.) as "local".
+    match ty {
+        Type::Path(TypePath { qself: None, path }) => path.segments.len() < 2,
+        _ => true,
+    }
 }
 
 /// Return the last segment of a type path, including generic arguments.
@@ -111,6 +112,35 @@ fn last_ident(ty: &Type) -> PathSegment {
     } else {
         unreachable!("Expected Type::Path in last_ident");
     }
+}
+
+/// An absolute-path dependency type is something we can safely introspect with
+/// `Type::Path` *and* that already starts at the crate root (≥ 2 segments).
+fn is_absolute_dep_ty(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Path(TypePath { qself: None, path })
+            if path.segments.len() >= 2
+    )
+}
+
+/// Collect a list of *valid* dependency types while *also* generating
+/// `compile_error!`s for every bad entry.  The returned vector is therefore
+/// 100 % safe to feed into later stages that use `last_ident()`.
+fn collect_valid_dep_tys<'a>(
+    items: impl Iterator<Item = &'a Type>,
+    errors: &mut Vec<TokenStream2>,
+) -> Vec<Type> {
+    items
+        .filter_map(|ty| {
+            if is_absolute_dep_ty(ty) {
+                Some(ty.clone())
+            } else {
+                errors.push(quote! { compile_error!("unsupported dependency type"); });
+                None
+            }
+        })
+        .collect()
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -588,7 +618,8 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .collect();
 
     // ── Top-level Dependencies ──────────────────────────────────────────
-    let dep_tys: Vec<_> = deps.iter().map(|d| d.trait_ty.clone()).collect();
+    let mut dep_error_tokens = Vec::<TokenStream2>::new();
+    let dep_tys = collect_valid_dep_tys(deps.iter().map(|d| &d.trait_ty), &mut dep_error_tokens);
     let (dep_field_defs, dep_field_inits, dep_getters, dep_trait_impls) =
         gen_dep_artifacts(&ctx_name, &dep_tys);
 
@@ -635,6 +666,9 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             #crate_root::#impl_macro!(#ctx_name);
         });
     }
+
+    // `compile_error!`s for any invalid deps we filtered out above.
+    view_impl_macro_calls.extend(dep_error_tokens);
 
     quote! {
         #[derive(Debug)]
@@ -717,7 +751,12 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
     // Dependency aliases ───────────────────────────────────────
     let mut alias_reexports = Vec::<TokenStream2>::new();
-    let dep_overlay_tys: Vec<_> = dep_overlays.iter().map(|d| d.trait_ty.clone()).collect();
+    // Dependency overlays – keep only well-formed absolute paths.
+    let mut overlay_error_tokens = Vec::<TokenStream2>::new();
+    let dep_overlay_tys = collect_valid_dep_tys(
+        dep_overlays.iter().map(|d| &d.trait_ty),
+        &mut overlay_error_tokens,
+    );
 
     for trait_ty in &dep_overlay_tys {
         // ---------- absolute-path validation ----------
@@ -777,10 +816,9 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .collect();
 
     // Overlay deps signatures: use full Type (trait).
-    let dep_sigs: Vec<_> = dep_overlays
+    let dep_sigs: Vec<_> = dep_overlay_tys
         .iter()
-        .map(|item| {
-            let trait_ty = &item.trait_ty;
+        .map(|trait_ty| {
             let chain = type_ident_chain(trait_ty);
             let fn_name = chain_to_snake(&chain);
             quote! {
@@ -816,11 +854,10 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
-    // Overlay dep impls for the view trait simply forward to inherent ctx getter that overlay macro will create.
-    let dep_impls: Vec<_> = dep_overlays
+    // Generate impls only for *valid* overlays.
+    let dep_impls: Vec<_> = dep_overlay_tys
         .iter()
-        .map(|item| {
-            let trait_ty = &item.trait_ty;
+        .map(|trait_ty| {
             let chain = type_ident_chain(trait_ty);
             let fn_name = chain_to_snake(&chain);
             let alias_snake = chain_to_snake(&chain);
@@ -991,6 +1028,9 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
                 #(#overlay_trait_impls)*
             };
         }
+
+        // Propagate compile errors for invalid overlay deps.
+        #(#overlay_error_tokens)*
     }
 }
 
