@@ -1272,6 +1272,11 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         .map(|i| format_ident!("arg{}", i))
         .collect();
 
+    let return_arc_ty = match dep_kind(&trait_ty) {
+        DepKind::Trait => quote! { std::sync::Arc<#trait_ty + Send + Sync> },
+        DepKind::Struct => quote! { std::sync::Arc<#trait_ty> },
+    };
+
     // Construct builder call tokens.
     let builder_call = if builder_is_async {
         quote! { (#builder)(ctx_arc, #( #arg_idents ),* ).await? }
@@ -1281,23 +1286,20 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
 
     // Generate code.
     quote! {
-        // Trait definition -------------------------------------------------
+        // -- trait definition -------------------------------------------------
         #[async_trait::async_trait]
         pub trait #trait_name {
-            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* ) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ty + Send + Sync>,
-                ::fractic_server_error::ServerError
-            >;
+            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* )
+                -> ::std::result::Result<#return_arc_ty,
+                                          ::fractic_server_error::ServerError>;
         }
 
-        // Trait implementation for `Arc<Ctx>` to avoid needing internal weak ptrs.
+        // -- trait impl for Arc<Ctx> -----------------------------------------
         #[async_trait::async_trait]
         impl #trait_name for std::sync::Arc<#ctx_ty> {
-            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* ) -> ::std::result::Result<
-                std::sync::Arc<dyn #trait_ty + Send + Sync>,
-                ::fractic_server_error::ServerError
-            > {
-                // Forward to helper builder
+            async fn #getter(&self #( , #arg_idents : #extra_arg_types )* )
+                -> ::std::result::Result<#return_arc_ty,
+                                          ::fractic_server_error::ServerError> {
                 let ctx_arc = self.clone();
                 let concrete = #builder_call;
                 Ok(std::sync::Arc::new(concrete))
