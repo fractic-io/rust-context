@@ -1274,8 +1274,16 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
     }
     let (is_async, arg_idents, arg_types): (bool, Vec<Ident>, Vec<TokenStream2>) = match &builder {
         Expr::Closure(ExprClosure {
-            asyncness, inputs, ..
+            asyncness,
+            inputs,
+            body,
+            ..
         }) => {
+            // async |..| { … }  ➜ asyncness.is_some()
+            // |..| async { … } ➜ body is Expr::Async
+            let body_is_async_block = matches!(body.as_ref(), Expr::Async(_));
+            let is_async = asyncness.is_some() || body_is_async_block;
+
             let mut ids = Vec::new();
             let mut tys = Vec::new();
 
@@ -1304,7 +1312,7 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
                 }
             }
 
-            (asyncness.is_some(), ids, tys)
+            (is_async, ids, tys)
         }
         _ => (true, Vec::new(), Vec::new()),
     };
