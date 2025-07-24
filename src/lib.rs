@@ -1262,85 +1262,180 @@ fn gen_register_singleton(input: RegisterDepInput) -> TokenStream2 {
 
 fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
     use syn::{Expr, ExprClosure, Pat, PatType};
+
     let RegisterDepInput {
         ctx_ty,
         type_ty,
         builder,
     } = input;
 
-    // ── analyse the closure ───────────────────────────────────────────────
+    // ── inspect the supplied builder closure ──────────────────────────────
     let (is_async, extra_tys): (bool, Vec<Type>) = match &builder {
         Expr::Closure(ExprClosure {
             asyncness, inputs, ..
         }) => {
-            let mut v = Vec::new();
+            let mut extras = Vec::new();
+            // inputs: (ctx, arg0, arg1, …)  → skip ctx
             for p in inputs.iter().skip(1) {
-                // skip the ctx
                 match p {
-                    Pat::Type(PatType { ty, .. }) => v.push((**ty).clone()),
+                    Pat::Type(PatType { ty, .. }) => extras.push((**ty).clone()),
                     _ => {
                         return quote! { compile_error!(
                             "each builder arg must be written `name: Type`"
-                        ); }
+                        ); };
                     }
                 }
             }
-            (asyncness.is_some(), v)
+            (asyncness.is_some(), extras)
         }
-        _ => (true, Vec::new()), // fallback – treat as async, no extra args
+        _ => (true, Vec::new()),
     };
 
-    // ── derived identifiers ───────────────────────────────────────────────
+    // ── identifiers & helper lists ────────────────────────────────────────
     let chain = type_ident_chain(&type_ty);
-    let stem_pascal = chain_to_pascal(&chain); // ExportProcessor
+    let stem_pascal = chain_to_pascal(&chain); // e.g. ExportProcessor
     let factory_id = format_ident!("{stem_pascal}Factory");
+    let arg_ids: Vec<Ident> = (0..extra_tys.len())
+        .map(|i| format_ident!("arg{i}"))
+        .collect();
 
-    // the Arc-wrapped return type
+    // Arc-wrapped return type used by the *public* API ---------------------
     let arc_ret_ty = match dep_kind(&type_ty) {
         DepKind::Trait => quote! { std::sync::Arc<#type_ty + Send + Sync> },
         DepKind::Struct => quote! { std::sync::Arc<#type_ty> },
     };
 
-    // idents for extra args: arg0, arg1, …
-    let arg_ids: Vec<Ident> = (0..extra_tys.len())
-        .map(|i| format_ident!("arg{i}"))
-        .collect();
-
-    // async / sync toggles
-    let maybe_async_kw = if is_async {
-        quote! { async }
+    // ---------------------------------------------------------------------
+    // 1.  The stored builder type
+    // ---------------------------------------------------------------------
+    let builder_field_ty = if is_async {
+        quote! {
+            std::sync::Arc<
+                dyn Fn(
+                    std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
+                        > + Send
+                    >
+                > + Send + Sync
+            >
+        }
     } else {
-        TokenStream2::new()
+        quote! {
+            std::sync::Arc<
+                dyn Fn(
+                    std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
+                ) -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
+                + Send + Sync
+            >
+        }
     };
-    let call_builder = if is_async {
-        quote! { (#builder)(self.ctx.clone(), #( #arg_ids ),* ).await? }
-    } else {
-        quote! { (#builder)(self.ctx.clone(), #( #arg_ids ),* )? }
-    };
 
-    // ── final expansion ───────────────────────────────────────────────────
-    quote! {
-        // 1.  the factory struct -------------------------------------------
-        #[derive(Clone)]
-        pub struct #factory_id { ctx: std::sync::Arc<#ctx_ty> }
-
-        impl #factory_id {
-            pub fn new(ctx: std::sync::Arc<#ctx_ty>) -> Self { Self { ctx } }
-
-            pub #maybe_async_kw fn build(&self #( , #arg_ids : #extra_tys )* )
-                -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
+    // ---------------------------------------------------------------------
+    // 2.  new(ctx, builder):  wraps the user closure to return an Arc
+    // ---------------------------------------------------------------------
+    let new_fn = if is_async {
+        quote! {
+            pub fn new<B, Fut, R>(
+                ctx: std::sync::Arc<#ctx_ty>,
+                builder: B
+            ) -> Self
+            where
+                B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*) -> Fut
+                     + Send + Sync + 'static,
+                Fut: std::future::Future<
+                        Output = ::std::result::Result<R, ::fractic_server_error::ServerError>
+                     > + Send + 'static,
+                R  : Send + Sync + 'static,
             {
-                let concrete = #call_builder;
-                ::std::result::Result::Ok(std::sync::Arc::new(concrete))
+                // Wrapper turns `R` into `Arc<…>`.
+                let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                    let fut = builder(ctx, #( #arg_ids ),*);
+                    std::pin::Pin::from(Box::new(async move {
+                        let concrete = fut.await?;
+                        let arc: #arc_ret_ty = std::sync::Arc::new(concrete);
+                        ::std::result::Result::Ok(arc)
+                    }))
+                };
+
+                Self {
+                    ctx,
+                    builder: std::sync::Arc::new(wrapped),
+                }
             }
         }
+    } else {
+        quote! {
+            pub fn new<B, R>(
+                ctx: std::sync::Arc<#ctx_ty>,
+                builder: B
+            ) -> Self
+            where
+                B: Fn(
+                        std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
+                     ) -> ::std::result::Result<R, ::fractic_server_error::ServerError>
+                     + Send + Sync + 'static,
+                R: Send + Sync + 'static,
+            {
+                let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                    builder(ctx, #( #arg_ids ),*).map(|concrete| {
+                        let arc: #arc_ret_ty = std::sync::Arc::new(concrete);
+                        arc
+                    })
+                };
 
-        // 2.  register the *factory* as a lazy singleton --------------------
+                Self {
+                    ctx,
+                    builder: std::sync::Arc::new(wrapped),
+                }
+            }
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // 3.  build(&self, …)
+    // ---------------------------------------------------------------------
+    let build_fn = if is_async {
+        quote! {
+            pub async fn build(&self #( , #arg_ids : #extra_tys )* )
+                -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
+            {
+                (self.builder)(self.ctx.clone(), #( #arg_ids ),*).await
+            }
+        }
+    } else {
+        quote! {
+            pub fn build(&self #( , #arg_ids : #extra_tys )* )
+                -> ::std::result::Result<#arc_ret_ty, ::fractic_server_error::ServerError>
+            {
+                (self.builder)(self.ctx.clone(), #( #arg_ids ),* )
+            }
+        }
+    };
+
+    // ---------------------------------------------------------------------
+    // 4.  final expansion
+    // ---------------------------------------------------------------------
+    quote! {
+        #[derive(Clone)]
+        pub struct #factory_id {
+            ctx:     std::sync::Arc<#ctx_ty>,
+            builder: #builder_field_ty,
+        }
+
+        impl #factory_id {
+            #new_fn
+            #build_fn
+        }
+
+        // Register the factory as the lazy singleton.
         ::fractic_context::register_ctx_singleton!(
             #ctx_ty,
             #factory_id,
             |ctx: std::sync::Arc<#ctx_ty>| async {
-                ::std::result::Result::Ok(#factory_id::new(ctx))
+                ::std::result::Result::Ok(#factory_id::new(ctx.clone(), #builder))
             }
         );
     }
