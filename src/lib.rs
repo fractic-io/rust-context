@@ -1,3 +1,4 @@
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -11,7 +12,6 @@ use syn::{
 // ──────────────────────────────────────────────────────────────
 // Helpers.
 // ──────────────────────────────────────────────────────────────
-use convert_case::{Case, Casing};
 
 fn to_snake(ident: &Ident) -> Ident {
     format_ident!(
@@ -749,7 +749,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         req_impl,
     } = input;
 
-    // Dependency aliases ───────────────────────────────────────
+    // -- Dependency aliases ───────────────────────────────────────
     let mut alias_reexports = Vec::<TokenStream2>::new();
     // Dependency overlays – keep only well-formed absolute paths.
     let mut overlay_error_tokens = Vec::<TokenStream2>::new();
@@ -759,7 +759,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
     );
 
     for trait_ty in &dep_overlay_tys {
-        // ---------- absolute-path validation ----------
+        // absolute-path validation
         if type_is_local(trait_ty) {
             let bad = type_ident_chain(trait_ty)
                 .first()
@@ -781,22 +781,33 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             continue;
         }
 
-        // Compute a deterministic alias for the parent module of the
-        // dependency's trait.
+        // 1. deterministic "stem" for every alias we create
         let alias_snake = chain_to_snake(&chain);
-        let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
+
+        // 2. the three symbols we have to re-export from the **parent module**
+        let trait_ident = &last_ident(trait_ty).ident; // e.g. `TtsRepository`
+        let default_fn_ident = format_ident!("__default_{}", alias_snake); // e.g. `__default_tts_repository`
+        let ctxhas_ident = format_ident!("CtxHas{}", chain_to_pascal(&chain));
+
+        // 3. names the rest of the macro will point at
+        let trait_alias_ident = format_ident!("__{}_trait", alias_snake); // `__tts_repository_trait`
+        let default_fn_alias = format_ident!("__{}_default", alias_snake); // `__tts_repository_default`
+        let ctxhas_alias = format_ident!("__{}_ctxhas", alias_snake); // `__tts_repository_ctxhas`
 
         // Parent path == everything except the last segment.
         let parent_path = type_path_prefix(trait_ty);
 
-        // Export alias for deterministic access at crate root.
         alias_reexports.push(quote! {
             #[doc(hidden)]
-            pub use #parent_path as #alias_mod_ident;
+            pub use #parent_path::#trait_ident      as #trait_alias_ident;
+            #[doc(hidden)]
+            pub use #parent_path::#default_fn_ident as #default_fn_alias;
+            #[doc(hidden)]
+            pub use #parent_path::#ctxhas_ident     as #ctxhas_alias;
         });
     }
 
-    // Signatures only ──────────────────────────────────────────
+    // -- Signatures only ──────────────────────────────────────────
     let env_sigs: Vec<_> = env
         .iter()
         .map(|kv| {
@@ -827,7 +838,7 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         })
         .collect();
 
-    // Implementations for the helper macro ─────────────────────
+    // -- Implementations for the helper macro ─────────────────────
     let env_impls: Vec<_> = env
         .iter()
         .map(|kv| {
@@ -861,10 +872,16 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let chain = type_ident_chain(trait_ty);
             let fn_name = chain_to_snake(&chain);
             let alias_snake = chain_to_snake(&chain);
-            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
-            let last_seg = last_ident(trait_ty);
+            let trait_alias_ident = format_ident!("__{}_trait", alias_snake);
+
+            // trait_args is just the generic argument list (if any):
+            let trait_args = match &last_ident(trait_ty).arguments {
+                syn::PathArguments::AngleBracketed(g) => quote! { #g },
+                _ => quote! {},
+            };
+
             quote! {
-                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn $crate::#alias_mod_ident::#last_seg + Send + Sync>, ::fractic_server_error::ServerError> {
+                async fn #fn_name(&self) -> ::std::result::Result<std::sync::Arc<dyn $crate::#trait_alias_ident #trait_args + Send + Sync>, ::fractic_server_error::ServerError> {
                     self.#fn_name().await
                 }
             }
@@ -898,12 +915,15 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
 
             // alias module
             let alias_snake = chain_to_snake(&chain);
-            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
+            let trait_alias_ident = format_ident!("__{}_trait", alias_snake);
 
             // keep generic args
-            let last_seg = last_ident(trait_ty);
-            // crate::__foo_mod::RootCrud<…>
-            let wrapped_trait_path_field = quote! { crate::#alias_mod_ident::#last_seg };
+            let trait_args = match &last_ident(trait_ty).arguments {
+                syn::PathArguments::AngleBracketed(g) => quote! { #g },
+                _ => quote! {},
+            };
+            // crate::__foo_trait<…>
+            let wrapped_trait_path_field = quote! { crate::#trait_alias_ident #trait_args };
 
             quote! {
                 #[doc(hidden)]
@@ -920,14 +940,17 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
             let field = chain_to_snake(&chain);
             let getter = field.clone();
             let override_fn = format_ident!("override_{}", field);
-            let default_fn_ident = format_ident!("__default_{}", field);
             let alias_snake = chain_to_snake(&chain);
-            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
+            let trait_alias_ident = format_ident!("__{}_trait", alias_snake);
+            let default_fn_alias = format_ident!("__{}_default", alias_snake);
 
             // keep generic args
-            let last_seg = last_ident(trait_ty);
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
-            let default_fn_path = quote! { $crate::#alias_mod_ident::#default_fn_ident };
+            let trait_args = match &last_ident(trait_ty).arguments {
+                syn::PathArguments::AngleBracketed(g) => quote! { #g },
+                _ => quote! {},
+            };
+            let wrapped_trait_path = quote! { $crate::#trait_alias_ident #trait_args };
+            let default_fn_path = quote! { $crate::#default_fn_alias };
 
             quote! {
                 pub async fn #getter(&self) -> ::std::result::Result<std::sync::Arc<dyn #wrapped_trait_path + Send + Sync>, ::fractic_server_error::ServerError> {
@@ -963,15 +986,18 @@ fn gen_define_ctx_view(input: DefineCtxViewInput) -> TokenStream2 {
         .map(|trait_ty| {
             let chain = type_ident_chain(trait_ty);
             let getter = chain_to_snake(&chain);
-            let trait_ident_q = format_ident!("CtxHas{}", chain_to_pascal(&chain));
             let alias_snake = chain_to_snake(&chain);
-            let alias_mod_ident = format_ident!("__{}_mod", alias_snake);
+            let trait_alias_ident = format_ident!("__{}_trait", alias_snake);
+            let ctxhas_alias = format_ident!("__{}_ctxhas", alias_snake);
 
             // keep generic args
-            let last_seg = last_ident(trait_ty);
+            let trait_args = match &last_ident(trait_ty).arguments {
+                syn::PathArguments::AngleBracketed(g) => quote! { #g },
+                _ => quote! {},
+            };
 
-            let ctxhas_path = quote! { $crate::#alias_mod_ident::#trait_ident_q };
-            let wrapped_trait_path = quote! { $crate::#alias_mod_ident::#last_seg };
+            let ctxhas_path = quote! { $crate::#ctxhas_alias };
+            let wrapped_trait_path = quote! { $crate::#trait_alias_ident #trait_args };
 
             quote! {
                 #[async_trait::async_trait]
