@@ -7,6 +7,7 @@ use syn::{
     braced, parse_macro_input, punctuated::Punctuated, Expr, GenericArgument, Ident, Path,
     PathArguments, PathSegment, Result, Token, Type, TypeParamBound, TypePath, TypeTraitObject,
 };
+use syn::{ExprClosure, Pat, PatType};
 
 // ──────────────────────────────────────────────────────────────
 // Helpers.
@@ -1261,8 +1262,6 @@ fn gen_register_singleton(input: RegisterDepInput) -> TokenStream2 {
 }
 
 fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
-    use syn::{Expr, ExprClosure, Pat, PatType};
-
     let RegisterDepInput {
         ctx_ty,
         type_ty,
@@ -1291,18 +1290,40 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
         _ => (true, Vec::new()),
     };
 
-    // ── identifiers & helper lists ────────────────────────────────────────
+    // ── helper identifiers ───────────────────────────────────────────────
     let chain = type_ident_chain(&type_ty);
-    let stem_pascal = chain_to_pascal(&chain); // e.g. ExportProcessor
+    let stem_pascal = chain_to_pascal(&chain);
     let factory_id = format_ident!("{stem_pascal}Factory");
     let arg_ids: Vec<Ident> = (0..extra_tys.len())
         .map(|i| format_ident!("arg{i}"))
         .collect();
 
-    // Arc-wrapped return type used by the *public* API ---------------------
-    let arc_ret_ty = match dep_kind(&type_ty) {
-        DepKind::Trait => quote! { std::sync::Arc<#type_ty + Send + Sync> },
-        DepKind::Struct => quote! { std::sync::Arc<#type_ty> },
+    // ── return-type tokens for the public API ────────────────────────────
+    let (arc_ret_ty, bound_trait_path, is_trait_dep) = match dep_kind(&type_ty) {
+        DepKind::Trait => {
+            // Extract the first trait path from `dyn …`.
+            let trait_path = if let Type::TraitObject(obj) = &type_ty {
+                obj.bounds
+                    .iter()
+                    .find_map(|b| match b {
+                        TypeParamBound::Trait(tb) => Some(quote! { #tb }),
+                        _ => None,
+                    })
+                    .expect("empty trait object")
+            } else {
+                quote! {}
+            };
+            (
+                quote! { std::sync::Arc<#type_ty + Send + Sync> },
+                trait_path,
+                true,
+            )
+        }
+        DepKind::Struct => (
+            quote! { std::sync::Arc<#type_ty> },
+            quote! {}, // no extra bound needed
+            false,
+        ),
     };
 
     // ---------------------------------------------------------------------
@@ -1337,58 +1358,100 @@ fn gen_register_factory(input: RegisterDepInput) -> TokenStream2 {
     // 2.  new(ctx, builder):  wraps the user closure to return an Arc
     // ---------------------------------------------------------------------
     let new_fn = if is_async {
-        quote! {
-            pub fn new<B, Fut, R>(
-                ctx: std::sync::Arc<#ctx_ty>,
-                builder: B
-            ) -> Self
-            where
-                B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*) -> Fut
-                     + Send + Sync + 'static,
-                Fut: std::future::Future<
-                        Output = ::std::result::Result<R, ::fractic_server_error::ServerError>
-                     > + Send + 'static,
-                R  : Send + Sync + 'static,
-            {
-                // Wrapper turns `R` into `Arc<…>`.
-                let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                    let fut = builder(ctx, #( #arg_ids ),*);
-                    std::pin::Pin::from(Box::new(async move {
-                        let concrete = fut.await?;
-                        let arc: #arc_ret_ty = std::sync::Arc::new(concrete);
-                        ::std::result::Result::Ok(arc)
-                    }))
-                };
-
-                Self {
-                    ctx,
-                    builder: std::sync::Arc::new(wrapped),
+        if is_trait_dep {
+            quote! {
+                pub fn new<B, Fut, R>(
+                    ctx: std::sync::Arc<#ctx_ty>,
+                    builder: B
+                ) -> Self
+                where
+                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*) -> Fut
+                         + Send + Sync + 'static,
+                    Fut: std::future::Future<Output =
+                            ::std::result::Result<R, ::fractic_server_error::ServerError>>
+                         + Send + 'static,
+                    R  : #bound_trait_path + Send + Sync + 'static,
+                {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                        let fut = builder(ctx, #( #arg_ids ),*);
+                        std::pin::Pin::from(Box::new(async move {
+                            let concrete: R = fut.await?;
+                            let arc_concrete = std::sync::Arc::new(concrete);
+                            let arc: #arc_ret_ty = arc_concrete; // unsize coercion
+                            ::std::result::Result::Ok(arc)
+                        }))
+                    };
+                    Self { ctx, builder: std::sync::Arc::new(wrapped) }
+                }
+            }
+        } else {
+            quote! {
+                pub fn new<B>(
+                    ctx: std::sync::Arc<#ctx_ty>,
+                    builder: B
+                ) -> Self
+                where
+                    B  : Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                         -> std::pin::Pin<
+                             Box<
+                                 dyn std::future::Future<Output =
+                                         ::std::result::Result<#type_ty, ::fractic_server_error::ServerError>>
+                                     + Send
+                             >
+                         > + Send + Sync + 'static,
+                {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                        let fut = builder(ctx, #( #arg_ids ),*);
+                        std::pin::Pin::from(Box::new(async move {
+                            let concrete = fut.await?;
+                            let arc = std::sync::Arc::new(concrete);
+                            ::std::result::Result::Ok(arc)
+                        }))
+                    };
+                    Self { ctx, builder: std::sync::Arc::new(wrapped) }
                 }
             }
         }
     } else {
-        quote! {
-            pub fn new<B, R>(
-                ctx: std::sync::Arc<#ctx_ty>,
-                builder: B
-            ) -> Self
-            where
-                B: Fn(
-                        std::sync::Arc<#ctx_ty>, #( #extra_tys ),*
-                     ) -> ::std::result::Result<R, ::fractic_server_error::ServerError>
-                     + Send + Sync + 'static,
-                R: Send + Sync + 'static,
-            {
-                let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
-                    builder(ctx, #( #arg_ids ),*).map(|concrete| {
-                        let arc: #arc_ret_ty = std::sync::Arc::new(concrete);
-                        arc
-                    })
-                };
-
-                Self {
-                    ctx,
-                    builder: std::sync::Arc::new(wrapped),
+        if is_trait_dep {
+            quote! {
+                pub fn new<B, R>(
+                    ctx: std::sync::Arc<#ctx_ty>,
+                    builder: B
+                ) -> Self
+                where
+                    B: Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                         -> ::std::result::Result<R, ::fractic_server_error::ServerError>
+                         + Send + Sync + 'static,
+                    R: #bound_trait_path + Send + Sync + 'static,
+                {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                        builder(ctx, #( #arg_ids ),*).map(|concrete: R| {
+                            let arc_concrete = std::sync::Arc::new(concrete);
+                            let arc: #arc_ret_ty = arc_concrete; // unsize coercion
+                            arc
+                        })
+                    };
+                    Self { ctx, builder: std::sync::Arc::new(wrapped) }
+                }
+            }
+        } else {
+            quote! {
+                pub fn new<B>(
+                    ctx: std::sync::Arc<#ctx_ty>,
+                    builder: B
+                ) -> Self
+                where
+                    B: Fn(std::sync::Arc<#ctx_ty>, #( #extra_tys ),*)
+                         -> ::std::result::Result<#type_ty, ::fractic_server_error::ServerError>
+                         + Send + Sync + 'static,
+                {
+                    let wrapped = move |ctx: std::sync::Arc<#ctx_ty>, #( #arg_ids : #extra_tys ),*| {
+                        builder(ctx, #( #arg_ids ),*).map(|concrete| {
+                            std::sync::Arc::new(concrete)
+                        })
+                    };
+                    Self { ctx, builder: std::sync::Arc::new(wrapped) }
                 }
             }
         }
