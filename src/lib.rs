@@ -643,6 +643,16 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         })
         .collect();
 
+    // Test-only init: argument definitions for env variables.
+    let test_init_env_args: Vec<_> = env
+        .iter()
+        .map(|kv| {
+            let ident = to_snake(&kv.key);
+            let ty = &kv.ty;
+            quote! { #ident: #ty }
+        })
+        .collect();
+
     // ── Secrets ──────────────────────────────────────────────────────────
     let secret_field_defs: Vec<_> = secrets
         .iter()
@@ -708,6 +718,16 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .map(|kv| {
             let ident = to_snake(&kv.key);
             quote! { #ident }
+        })
+        .collect();
+
+    // Test-only init: argument definitions for secret variables.
+    let test_init_secret_args: Vec<_> = secrets
+        .iter()
+        .map(|kv| {
+            let ident = to_snake(&kv.key);
+            let ty = &kv.ty;
+            quote! { #ident: #ty }
         })
         .collect();
 
@@ -820,6 +840,27 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 });
 
                 ::std::result::Result::Ok(ctx)
+            }
+        }
+
+        // Test-only init: bypass external env and secrets by providing values directly.
+        #[cfg(test)]
+        impl #ctx_name {
+            pub fn init_test(
+                #(#test_init_env_args),*,
+                #(#test_init_secret_args),*
+            ) -> ::std::sync::Arc<Self> {
+                use std::sync::Arc;
+                let ctx = Arc::new_cyclic(|weak| Self {
+                    #(#env_idents,)*
+                    #(#secret_idents,)*
+                    secrets_fetch_region: String::new(),
+                    secrets_fetch_id: String::new(),
+                    #(#dep_field_inits,)*
+                    #(#view_overlay_field_inits)*
+                    __weak_self: weak.clone(),
+                });
+                ctx
             }
         }
 
