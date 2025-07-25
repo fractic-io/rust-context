@@ -1,4 +1,4 @@
-use convert_case::{Case, Casing};
+use convert_case::{Boundary, Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, ToTokens as _};
@@ -13,12 +13,19 @@ use syn::{ExprClosure, Pat, PatIdent, PatType};
 // Helpers.
 // ──────────────────────────────────────────────────────────────
 
+/// Convert an identifier to `snake_case`, but keep digit
+/// sequences glued to the letters that precede them:
+/// `S3Util` → `s3_util`, `Version10Beta` → `version10_beta`.
 fn to_snake(ident: &Ident) -> Ident {
-    format_ident!(
-        "{}",
-        ident.to_string().to_case(Case::Snake),
-        span = ident.span()
-    )
+    let snake = ident
+        .to_string()
+        // treat the input as Camel/Pascal-case
+        .from_case(Case::Camel)
+        // ⤵ strip the two “letter → digit” split points
+        .without_boundaries(&Boundary::letter_digit())
+        .to_case(Case::Snake);
+
+    format_ident!("{}", snake, span = ident.span())
 }
 
 fn path_prefix(path: &Path) -> TokenStream2 {
@@ -92,10 +99,9 @@ fn type_ident_chain(ty: &Type) -> Vec<Ident> {
 
 /// snake_case concatenation, e.g. `["DatabaseRepository", "MySql"]` → `database_repository_mysql`
 fn chain_to_snake(idents: &[Ident]) -> Ident {
-    use convert_case::{Case, Casing};
     let s = idents
         .iter()
-        .map(|id| id.to_string().to_case(Case::Snake))
+        .map(|id| to_snake(id).to_string())
         .collect::<Vec<_>>()
         .join("_");
     format_ident!("{}", s)
@@ -103,7 +109,6 @@ fn chain_to_snake(idents: &[Ident]) -> Ident {
 
 /// PascalCase concatenation, e.g. `["DatabaseRepository", "MySql"]` → `DatabaseRepositoryMysql`
 fn chain_to_pascal(idents: &[Ident]) -> Ident {
-    use convert_case::{Case, Casing};
     let s = idents
         .iter()
         .map(|id| id.to_string().to_case(Case::Pascal))
