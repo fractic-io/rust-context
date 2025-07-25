@@ -777,13 +777,27 @@ fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             #overlay_field_ident: ::std::default::Default::default(),
         });
 
-        view_overlay_impl_macro_calls.push(quote! {
-            #crate_root::#overlay_impls_macro!(#ctx_name);
-        });
-
-        view_impl_macro_calls.push(quote! {
-            #crate_root::#impl_macro!(#ctx_name);
-        });
+        // If the view lives in *this* crate (`crate::…`) new versions of Rust
+        // don't allow calling it by its fully qualified path
+        // `crate::macro_name!(…)`. A unqualified `macro_name!(…)` is required
+        // instead (no further path specification is needed because
+        // `#[macro_export]` puts macros in the global namespace).
+        //
+        // Overlay implementation:
+        let overlay_call = if crate_root == "crate" {
+            quote! { #overlay_impls_macro!(#ctx_name); }
+        } else {
+            quote! { #crate_root::#overlay_impls_macro!(#ctx_name); }
+        };
+        view_overlay_impl_macro_calls.push(overlay_call);
+        //
+        // View implementation:
+        let impl_call = if crate_root == "crate" {
+            quote! { #impl_macro!(#ctx_name); }
+        } else {
+            quote! { #crate_root::#impl_macro!(#ctx_name); }
+        };
+        view_impl_macro_calls.push(impl_call);
     }
 
     // `compile_error!`s for any invalid deps we filtered out above.
