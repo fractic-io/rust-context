@@ -2,7 +2,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
 use crate::ast::DefineCtxInput;
-use crate::codegen::shared::gen_dep_artifacts;
+use crate::codegen::shared::{gen_blocking_dep_artifacts, gen_dep_artifacts};
 use crate::helpers::{chain_to_snake, collect_valid_dep_tys, to_snake, type_ident_chain};
 
 pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
@@ -152,9 +152,22 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
 
     // ── Top-level Dependencies ──────────────────────────────────────────
     let mut dep_error_tokens = Vec::<TokenStream2>::new();
-    let dep_tys = collect_valid_dep_tys(deps.iter().map(|d| &d.trait_ty), &mut dep_error_tokens);
-    let (dep_field_defs, dep_field_inits, dep_getters, dep_trait_impls) =
-        gen_dep_artifacts(&ctx_name, &dep_tys);
+    let async_dep_tys = collect_valid_dep_tys(
+        deps.iter().filter(|d| !d.blocking).map(|d| &d.trait_ty),
+        &mut dep_error_tokens,
+    );
+    let blocking_dep_tys = collect_valid_dep_tys(
+        deps.iter().filter(|d| d.blocking).map(|d| &d.trait_ty),
+        &mut dep_error_tokens,
+    );
+    let (mut dep_field_defs, mut dep_field_inits, mut dep_getters, mut dep_trait_impls) =
+        gen_dep_artifacts(&ctx_name, &async_dep_tys);
+    let (blocking_field_defs, blocking_field_inits, blocking_getters, blocking_trait_impls) =
+        gen_blocking_dep_artifacts(&ctx_name, &blocking_dep_tys);
+    dep_field_defs.extend(blocking_field_defs);
+    dep_field_inits.extend(blocking_field_inits);
+    dep_getters.extend(blocking_getters);
+    dep_trait_impls.extend(blocking_trait_impls);
 
     // ── View invocations ─────────────────────────────────────────────────
     let mut view_overlay_field_defs = Vec::<TokenStream2>::new();
@@ -220,7 +233,11 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     // ── Custom std::fmt::Debug implementation ────────────────────────────
     let debug_env_fields: Vec<_> = env.iter().map(|kv| to_snake(&kv.key)).collect();
     let debug_secret_fields: Vec<_> = secrets.iter().map(|kv| to_snake(&kv.key)).collect();
-    let debug_dep_fields: Vec<_> = dep_tys
+    let debug_dep_fields_async: Vec<_> = async_dep_tys
+        .iter()
+        .map(|ty| chain_to_snake(&type_ident_chain(ty)))
+        .collect();
+    let debug_dep_fields_blocking: Vec<_> = blocking_dep_tys
         .iter()
         .map(|ty| chain_to_snake(&type_ident_chain(ty)))
         .collect();
@@ -332,10 +349,21 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 )*
 
                 // ── Dependencies – show only “loaded / not loaded” ------------
+                // async deps (tokio::RwLock)
                 #(
                     ds.field(
-                        stringify!(#debug_dep_fields),
-                        &self.#debug_dep_fields
+                        stringify!(#debug_dep_fields_async),
+                        &self.#debug_dep_fields_async
+                            .try_read() // never blocks
+                            .map(|g| g.is_some()) // Option<bool>
+                            .unwrap_or(false),
+                    );
+                )*
+                // blocking deps (std::sync::RwLock)
+                #(
+                    ds.field(
+                        stringify!(#debug_dep_fields_blocking),
+                        &self.#debug_dep_fields_blocking
                             .try_read() // never blocks
                             .map(|g| g.is_some()) // Result<bool, _>
                             .unwrap_or(false), // poisoned → false
