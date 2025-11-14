@@ -18,22 +18,56 @@ impl Parse for KeyTy {
 #[derive(Debug)]
 pub struct DepItem {
     pub trait_ty: Type, // e.g. crate::rsc::tts::repositories::TtsRepository
+    pub blocking: bool,
 }
 impl Parse for DepItem {
     fn parse(input: ParseStream) -> Result<Self> {
-        input.parse::<Type>().map(|trait_ty| DepItem { trait_ty })
+        // Optional `blocking` keyword before the type.
+        let mut blocking = false;
+        let ahead = input.fork();
+        let has_blocking = if ahead.peek(Ident) {
+            let kw: Ident = ahead.parse()?;
+            kw == "blocking"
+        } else {
+            false
+        };
+        if has_blocking {
+            let _: Ident = input.parse()?; // consume the "blocking" keyword
+            blocking = true;
+        }
+        let trait_ty: Type = input.parse()?;
+        Ok(DepItem { trait_ty, blocking })
     }
 }
 
 #[derive(Debug)]
 pub struct DepOverlayItem {
     pub trait_ty: Type,
+    pub blocking: bool,
 }
 impl Parse for DepOverlayItem {
     fn parse(input: ParseStream) -> Result<Self> {
-        input
-            .parse::<Type>()
-            .map(|trait_ty| DepOverlayItem { trait_ty })
+        // Optional `blocking` keyword before the type.
+        let ahead = input.fork();
+        let has_blocking = if ahead.peek(Ident) {
+            let kw: Ident = ahead.parse()?;
+            kw == "blocking"
+        } else {
+            false
+        };
+        if has_blocking {
+            let _: Ident = input.parse()?; // consume the "blocking" keyword
+            let trait_ty: Type = input.parse()?;
+            Ok(DepOverlayItem {
+                trait_ty,
+                blocking: true,
+            })
+        } else {
+            input.parse::<Type>().map(|trait_ty| DepOverlayItem {
+                trait_ty,
+                blocking: false,
+            })
+        }
     }
 }
 
