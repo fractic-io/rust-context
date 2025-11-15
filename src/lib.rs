@@ -4,9 +4,11 @@ use syn::parse_macro_input;
 use crate::{
     ast::{DefineCtxInput, DefineCtxViewInput, RegisterDepInput},
     codegen::{
-        define_ctx::gen_define_ctx, define_ctx_view::gen_define_ctx_view,
-        register_ctx_blocking::gen_register_blocking, register_ctx_factory::gen_register_factory,
-        register_ctx_singleton::gen_register_singleton,
+        define_ctx::gen_define_ctx,
+        define_ctx_view::gen_define_ctx_view,
+        register_ctx_blocking::{gen_register_blocking, gen_register_blocking_alias},
+        register_ctx_factory::gen_register_factory,
+        register_ctx_singleton::{gen_register_singleton, gen_register_singleton_alias},
     },
 };
 
@@ -49,4 +51,16 @@ pub fn register_ctx_factory(input: TokenStream) -> TokenStream {
 pub fn register_ctx_blocking(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as RegisterDepInput);
     gen_register_blocking(parsed).into()
+}
+
+#[proc_macro]
+pub fn register_ctx_singleton_alias(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    gen_register_singleton_alias(parsed).into()
+}
+
+#[proc_macro]
+pub fn register_ctx_blocking_alias(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as RegisterDepInput);
+    gen_register_blocking_alias(parsed).into()
 }
