@@ -28,7 +28,7 @@ pub fn to_snake(ident: &Ident) -> Ident {
         // treat the input as Camel/Pascal-case
         .from_case(Case::Camel)
         // ⤵ strip the two “letter → digit” split points
-        .without_boundaries(&Boundary::letter_digit())
+        .remove_boundaries(&Boundary::letter_digit())
         .to_case(Case::Snake);
 
     format_ident!("{}", snake, span = ident.span())
