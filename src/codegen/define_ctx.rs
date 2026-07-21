@@ -94,7 +94,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         quote! {
             let __secrets_util =
                 ::fractic_aws_secrets::SecretsUtil::new(secrets_fetch_region.clone()).await;
-            let __secret_map = __secrets_util
+            let mut __secret_map = __secrets_util
                 .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*])
                 .await
                 .map_err(|e| ::fractic_server_error::InitError::with_debug("failed to load secrets", &e).into())?;
@@ -110,15 +110,16 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let ty = &kv.ty;
             let key_name = kv.key.to_string();
             quote! {
-                let #ident: #ty = __secret_map
-                    .get(#key_name)
-                    .ok_or_else(|| ::fractic_server_error::InitError::new(
-                        concat!("missing secret key `", #key_name, "`")
-                    ).into())?
-                    .parse()
-                    .map_err(|e| ::fractic_server_error::InitError::with_debug(
-                        concat!("failed to parse secret `", #key_name, "`"), &e
-                    ).into())?;
+                let #ident: #ty = ::fractic_aws_secrets::serde_json::from_value(
+                    __secret_map
+                        .remove(#key_name)
+                        .ok_or_else(|| ::fractic_server_error::InitError::new(
+                            concat!("missing secret key `", #key_name, "`")
+                        ).into())?
+                )
+                .map_err(|e| ::fractic_server_error::InitError::with_debug(
+                    concat!("failed to deserialize secret `", #key_name, "`"), &e
+                ).into())?;
             }
         })
         .collect();
