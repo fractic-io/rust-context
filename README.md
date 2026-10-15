@@ -83,3 +83,11 @@ register_ctx_factory!(
     }
 ); // -> ProcessorFactory
 ```
+
+### Optional secrets
+
+Declare `XAI_API_KEY: Option<String>` in `secrets` to permit a missing key or JSON
+`null`. A present value must deserialize to the declared type. Required keys,
+malformed values, and Secrets Manager failures still fail initialization.
+`Option<T>`, `std::option::Option<T>`, and `core::option::Option<T>` are supported;
+type aliases are not inspected by the macro. Getters retain the declared type.
