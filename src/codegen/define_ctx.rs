@@ -102,7 +102,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let __secrets_util =
                 ::fractic_aws_secrets::SecretsUtil::new(secrets_fetch_region.clone()).await;
             let mut __secret_map = __secrets_util
-                .load_secrets_with_optional(&secrets_fetch_id, &[#(#secret_key_strs),*], &[#(#optional_secret_key_strs),*])
+                .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*], &[#(#optional_secret_key_strs),*])
                 .await
                 .map_err(|e| ::fractic_server_error::InitError::with_debug("failed to load secrets", &e).into())?;
         }
@@ -430,7 +430,7 @@ mod tests {
     fn generates_optional_and_required_loading_with_typed_deserialization() {
         let input = syn::parse_str("name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets { REQUIRED: String, OPTIONAL: Option<String> }, deps {}, views {}").unwrap();
         let output = gen_define_ctx(input).to_string();
-        assert!(output.contains("load_secrets_with_optional"));
+        assert!(output.contains("load_secrets"));
         assert!(
             output.contains("unwrap_or (:: fractic_aws_secrets :: serde_json :: Value :: Null)")
         );
