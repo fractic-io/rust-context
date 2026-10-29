@@ -84,10 +84,17 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
 
     let secret_key_strs: Vec<_> = secrets
         .iter()
+        .filter(|kv| !is_optional_secret(&kv.ty))
         .map(|kv| {
             let key_name = kv.key.to_string();
             quote! { #key_name }
         })
+        .collect();
+
+    let optional_secret_key_strs: Vec<_> = secrets
+        .iter()
+        .filter(|kv| is_optional_secret(&kv.ty))
+        .map(|kv| kv.key.to_string())
         .collect();
 
     let secret_fetch: TokenStream2 = if !secrets.is_empty() {
@@ -95,7 +102,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             let __secrets_util =
                 ::fractic_aws_secrets::SecretsUtil::new(secrets_fetch_region.clone()).await;
             let mut __secret_map = __secrets_util
-                .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*])
+                .load_secrets(&secrets_fetch_id, &[#(#secret_key_strs),*], &[#(#optional_secret_key_strs),*])
                 .await
                 .map_err(|e| ::fractic_server_error::InitError::with_debug("failed to load secrets", &e).into())?;
         }
@@ -103,26 +110,23 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         TokenStream2::new()
     };
 
-    let secret_inits: Vec<_> = secrets
-        .iter()
-        .map(|kv| {
-            let ident = to_snake(&kv.key);
-            let ty = &kv.ty;
-            let key_name = kv.key.to_string();
-            quote! {
-                let #ident: #ty = ::fractic_aws_secrets::serde_json::from_value(
-                    __secret_map
-                        .remove(#key_name)
-                        .ok_or_else(|| ::fractic_server_error::InitError::new(
-                            concat!("missing secret key `", #key_name, "`")
-                        ).into())?
-                )
-                .map_err(|e| ::fractic_server_error::InitError::with_debug(
-                    concat!("failed to deserialize secret `", #key_name, "`"), &e
+    let secret_inits: Vec<_> = secrets.iter().map(|kv| {
+        let ident = to_snake(&kv.key);
+        let ty = &kv.ty;
+        let key_name = kv.key.to_string();
+        let value = if is_optional_secret(ty) {
+            quote! { __secret_map.remove(#key_name).unwrap_or(::fractic_aws_secrets::serde_json::Value::Null) }
+        } else {
+            quote! { __secret_map.remove(#key_name).ok_or_else(||
+                ::fractic_server_error::InitError::new(concat!("missing secret key `", #key_name, "`")).into())? }
+        };
+        quote! {
+            let #ident: #ty = ::fractic_aws_secrets::serde_json::from_value(#value)
+                .map_err(|_| ::fractic_server_error::InitError::new(
+                    concat!("failed to deserialize secret `", #key_name, "`")
                 ).into())?;
-            }
-        })
-        .collect();
+        }
+    }).collect();
 
     let secret_getters: Vec<_> = secrets
         .iter()
@@ -298,8 +302,8 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         #[cfg(test)]
         impl #ctx_name {
             pub fn init_test(
-                #(#test_init_env_args),*,
-                #(#test_init_secret_args),*
+                #(#test_init_env_args,)*
+                #(#test_init_secret_args,)*
             ) -> ::std::sync::Arc<Self> {
                 use std::sync::Arc;
                 let ctx = Arc::new_cyclic(|weak| Self {
@@ -374,5 +378,63 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 ds.finish()
             }
         }
+    }
+}
+
+// Helpers.
+// ----------------------------------------------------------------------------
+
+fn is_optional_secret(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    if path.qself.is_some() {
+        return false;
+    }
+    let segments = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    matches!(
+        segments
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["Option"] | ["std", "option", "Option"] | ["core", "option", "Option"]
+    )
+}
+
+// Tests.
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recognizes_standard_option_paths_only() {
+        for ty in [
+            "Option<String>",
+            "std::option::Option<String>",
+            "::core::option::Option<Vec<u8>>",
+        ] {
+            assert!(is_optional_secret(&syn::parse_str(ty).unwrap()));
+        }
+        for ty in ["String", "Vec<Option<String>>", "custom::Option<String>"] {
+            assert!(!is_optional_secret(&syn::parse_str(ty).unwrap()));
+        }
+    }
+    #[test]
+    fn generates_optional_and_required_loading_with_typed_deserialization() {
+        let input = syn::parse_str("name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets { REQUIRED: String, OPTIONAL: Option<String> }, deps {}, views {}").unwrap();
+        let output = gen_define_ctx(input).to_string();
+        assert!(output.contains("load_secrets"));
+        assert!(
+            output.contains("unwrap_or (:: fractic_aws_secrets :: serde_json :: Value :: Null)")
+        );
+        assert!(output.contains("missing secret key `"));
+        syn::parse2::<syn::File>(gen_define_ctx(syn::parse_str("name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets { OPTIONAL: Option<String> }, deps {}, views {}").unwrap())).unwrap();
     }
 }
