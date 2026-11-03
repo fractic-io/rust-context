@@ -19,4 +19,3 @@ register_ctx_factory,register_ctx_blocking,shared}.rs` (emit Rust),
   `std`); keep new generated items behind `__`-prefixed names.
 - A change to the macro grammar is breaking for every `cfg/context.rs` in
   the workspace: title it `Breaking: …` and update the README example.
-- Commit / PR titles: imperative, trailing period.
