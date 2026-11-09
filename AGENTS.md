@@ -18,4 +18,4 @@ register_ctx_factory,register_ctx_blocking,shared}.rs` (emit Rust),
   reference paths that resolve there (`fractic_aws_secrets`, `tokio`,
   `std`); keep new generated items behind `__`-prefixed names.
 - A change to the macro grammar is breaking for every `cfg/context.rs` in
-  the workspace: title it `Breaking: …` and update the README example.
+  the workspace: mark the PR `↯` and update the README example.
