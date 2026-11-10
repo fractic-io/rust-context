@@ -198,7 +198,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         let impl_macro = format_ident!("__impl_{}_for", view_ident);
         let overlay_impls_macro = format_ident!("__overlay_impls_{}_for", view_ident);
         let overlay_struct_name = format_ident!("__{}DepsOverlay", view_ident);
-        let overlay_field_ident = format_ident!("__{}_deps", to_snake(&view_ident));
+        let overlay_field_ident = format_ident!("__{}_deps", to_snake(view_ident));
 
         view_overlay_field_defs.push(quote! {
             #[doc(hidden)]
@@ -301,6 +301,8 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         // Test-only init: bypass external env and secrets by providing values directly.
         #[cfg(test)]
         impl #ctx_name {
+            // One argument per env var and secret.
+            #[allow(clippy::too_many_arguments)]
             pub fn init_test(
                 #(#test_init_env_args,)*
                 #(#test_init_secret_args,)*

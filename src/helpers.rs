@@ -34,9 +34,9 @@ pub fn to_snake(ident: &Ident) -> Ident {
     format_ident!("{}", snake, span = ident.span())
 }
 
-/// Get the prefix of a fully-qualified path. For example:
-///   > `crate::rsc::tts::repositories::TtsRepository`
-///      → `crate::rsc::tts::repositories`
+/// Get the prefix of a fully-qualified path, for example
+/// `crate::rsc::tts::repositories::TtsRepository` →
+/// `crate::rsc::tts::repositories`.
 pub fn path_prefix(path: &Path) -> TokenStream2 {
     // `crate::rsc::tts::repositories`  (no trailing "::")
     let mut ts = TokenStream2::new();
