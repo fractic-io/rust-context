@@ -14,7 +14,7 @@ register_ctx_factory,register_ctx_blocking,shared}.rs` (emit Rust),
 `helpers.rs`.
 
 - Verify macro changes by building a consumer (`storyengine/api/v0`,
-  `app/backend/api/v1`) through its `[patch]`. Generated code may only
+  `app/backend/api/v1`), which compile this checkout. Generated code may only
   reference paths that resolve there (`fractic_aws_secrets`, `tokio`,
   `std`); keep new generated items behind `__`-prefixed names.
 - A change to the macro grammar is breaking for every `cfg/context.rs` in
