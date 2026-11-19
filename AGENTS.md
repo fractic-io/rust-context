@@ -17,5 +17,5 @@ register_ctx_factory,register_ctx_blocking,shared}.rs` (emit Rust),
   reference paths that resolve in the consuming crate
   (`fractic_aws_secrets`, `tokio`, `std`); keep new generated items behind
   `__`-prefixed names.
-- A change to the macro grammar is breaking for every consumer's
-  `define_ctx!`: mark the PR `↯` and update the README example.
+- A change to the macro grammar breaks every consumer's `define_ctx!`;
+  update the README example with it.
