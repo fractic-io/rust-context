@@ -82,8 +82,8 @@ pub struct SecretsFetch {
 pub struct DefineCtxInput {
     pub ctx_name: Ident,
     pub env: Vec<KeyTy>,
-    /// `Some` exactly when `secrets` is non-empty: the keys are optional (and
-    /// ignored) without secrets, required with them.
+    /// `Some` exactly when `secrets` is non-empty. Without secrets the keys
+    /// may be left out, and are ignored when given.
     pub secrets_fetch: Option<SecretsFetch>,
     pub secrets: Vec<KeyTy>,
     pub deps: Vec<DepItem>,
@@ -148,9 +148,9 @@ impl Parse for DefineCtxInput {
                     return Err(syn::Error::new(
                         sec_kw.span(),
                         format!(
-                            "`define_ctx!`: `secrets` is not empty, so {missing} must be given \
-                             before it (the env vars naming the Secrets Manager region and \
-                             secret id)"
+                            "`define_ctx!`: a non-empty `secrets` needs {missing} before it, \
+                             naming the env vars that hold the Secrets Manager region and \
+                             secret id"
                         ),
                     ));
                 }
@@ -355,7 +355,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("`secrets_fetch_id:` must be given"), "{err}");
+        assert!(err.contains("needs `secrets_fetch_id:` before"), "{err}");
         assert!(!err.contains("secrets_fetch_region"), "{err}");
     }
 }

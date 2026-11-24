@@ -96,9 +96,9 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .map(|kv| kv.key.to_string())
         .collect();
 
-    // Where secrets are fetched from: present only when there are secrets (see
-    // `DefineCtxInput::secrets_fetch`), so a context without secrets reads no
-    // fetch env vars and has no fetch fields. Each piece is `None` otherwise.
+    // Reading the env vars that name the secret, and the fields that keep their
+    // values, exist only when there are secrets to fetch. Without secrets each
+    // piece below is `None` and expands to nothing.
     let fetch = secrets_fetch.as_ref();
     let fetch_vars_init = fetch.map(
         |SecretsFetch {
