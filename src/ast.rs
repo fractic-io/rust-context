@@ -71,12 +71,20 @@ impl Parse for DepOverlayItem {
     }
 }
 
+/// Names of the env vars holding the Secrets Manager region and secret id.
+#[derive(Debug)]
+pub struct SecretsFetch {
+    pub region_ident: Ident,
+    pub id_ident: Ident,
+}
+
 #[derive(Debug)]
 pub struct DefineCtxInput {
     pub ctx_name: Ident,
     pub env: Vec<KeyTy>,
-    pub secrets_region_ident: Ident,
-    pub secrets_id_ident: Ident,
+    /// `Some` exactly when `secrets` is non-empty: the keys are optional (and
+    /// ignored) without secrets, required with them.
+    pub secrets_fetch: Option<SecretsFetch>,
     pub secrets: Vec<KeyTy>,
     pub deps: Vec<DepItem>,
     pub views: Vec<Path>,
@@ -103,23 +111,10 @@ impl Parse for DefineCtxInput {
             env_content.parse_terminated(KeyTy::parse, Token![,])?;
         input.parse::<Token![,]>()?;
 
-        // secrets_fetch_region: REGION_ENV_VAR,
-        let sr_kw: Ident = input.parse()?;
-        if sr_kw != "secrets_fetch_region" {
-            return Err(input.error("expected `secrets_fetch_region:`"));
-        }
-        input.parse::<Token![:]>()?;
-        let secrets_region_ident: Ident = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // secrets_fetch_id: ID_ENV_VAR,
-        let sid_kw: Ident = input.parse()?;
-        if sid_kw != "secrets_fetch_id" {
-            return Err(input.error("expected `secrets_fetch_id:`"));
-        }
-        input.parse::<Token![:]>()?;
-        let secrets_id_ident: Ident = input.parse()?;
-        input.parse::<Token![,]>()?;
+        // secrets_fetch_region: REGION_ENV_VAR,  (optional)
+        // secrets_fetch_id: ID_ENV_VAR,          (optional)
+        let secrets_region_ident = parse_optional_ident_entry(input, "secrets_fetch_region")?;
+        let secrets_id_ident = parse_optional_ident_entry(input, "secrets_fetch_id")?;
 
         // secrets { ... },
         let sec_kw: Ident = input.parse()?;
@@ -131,6 +126,36 @@ impl Parse for DefineCtxInput {
         let sec_items: Punctuated<KeyTy, Token![,]> =
             sec_content.parse_terminated(KeyTy::parse, Token![,])?;
         input.parse::<Token![,]>()?;
+
+        // The fetch keys only matter when there is something to fetch.
+        let secrets_fetch = if sec_items.is_empty() {
+            None
+        } else {
+            match (secrets_region_ident, secrets_id_ident) {
+                (Some(region_ident), Some(id_ident)) => Some(SecretsFetch {
+                    region_ident,
+                    id_ident,
+                }),
+                (region, id) => {
+                    let missing = [
+                        region.is_none().then_some("`secrets_fetch_region:`"),
+                        id.is_none().then_some("`secrets_fetch_id:`"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                    return Err(syn::Error::new(
+                        sec_kw.span(),
+                        format!(
+                            "`define_ctx!`: `secrets` is not empty, so {missing} must be given \
+                             before it (the env vars naming the Secrets Manager region and \
+                             secret id)"
+                        ),
+                    ));
+                }
+            }
+        };
 
         // deps { ... },
         let deps_kw: Ident = input.parse()?;
@@ -156,8 +181,7 @@ impl Parse for DefineCtxInput {
         Ok(DefineCtxInput {
             ctx_name,
             env: env_items.into_iter().collect(),
-            secrets_region_ident,
-            secrets_id_ident,
+            secrets_fetch,
             secrets: sec_items.into_iter().collect(),
             deps: deps_items.into_iter().collect(),
             views: views_items.into_iter().collect(),
@@ -255,5 +279,83 @@ impl Parse for RegisterDepInput {
             type_ty: trait_ty,
             builder,
         })
+    }
+}
+
+// Helpers.
+// ----------------------------------------------------------------------------
+
+/// Parses `<key>: IDENT,` if the next token is `key`, otherwise consumes
+/// nothing.
+fn parse_optional_ident_entry(input: ParseStream, key: &str) -> Result<Option<Ident>> {
+    let ahead = input.fork();
+    match ahead.parse::<Ident>() {
+        Ok(kw) if kw == key => {}
+        _ => return Ok(None),
+    }
+    let _: Ident = input.parse()?;
+    input.parse::<Token![:]>()?;
+    let value: Ident = input.parse()?;
+    input.parse::<Token![,]>()?;
+    Ok(Some(value))
+}
+
+// Tests.
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(input: &str) -> Result<DefineCtxInput> {
+        syn::parse_str(input)
+    }
+
+    #[test]
+    fn fetch_keys_are_optional_without_secrets() {
+        let input = parse("name: Ctx, env {}, secrets {}, deps {}, views {}").unwrap();
+        assert!(input.secrets_fetch.is_none());
+    }
+
+    #[test]
+    fn fetch_keys_are_accepted_and_ignored_without_secrets() {
+        let input = parse(
+            "name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, \
+             secrets {}, deps {}, views {}",
+        )
+        .unwrap();
+        assert!(input.secrets_fetch.is_none());
+    }
+
+    #[test]
+    fn fetch_keys_are_kept_with_secrets() {
+        let input = parse(
+            "name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, \
+             secrets { KEY: String }, deps {}, views {}",
+        )
+        .unwrap();
+        let fetch = input.secrets_fetch.unwrap();
+        assert_eq!(fetch.region_ident, "REGION");
+        assert_eq!(fetch.id_ident, "ID");
+    }
+
+    #[test]
+    fn missing_fetch_keys_with_secrets_are_named_in_the_error() {
+        let err = parse("name: Ctx, env {}, secrets { KEY: String }, deps {}, views {}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`secrets_fetch_region:` and `secrets_fetch_id:`"),
+            "{err}"
+        );
+
+        let err = parse(
+            "name: Ctx, env {}, secrets_fetch_region: REGION, secrets { KEY: String }, \
+             deps {}, views {}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`secrets_fetch_id:` must be given"), "{err}");
+        assert!(!err.contains("secrets_fetch_region"), "{err}");
     }
 }

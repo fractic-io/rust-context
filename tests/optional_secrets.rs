@@ -28,3 +28,13 @@ fn optional_getters_and_redaction_survive_macro_expansion() {
     assert!(!debug.contains("required-secret"));
     assert!(!debug.contains("optional-secret"));
 }
+
+#[tokio::test]
+async fn init_with_secrets_still_requires_the_fetch_env_vars() {
+    assert!(std::env::var_os("REGION").is_none());
+    let err = OptionalContext::init().await.unwrap_err();
+    assert!(
+        format!("{err:?}").contains("missing env var `REGION`"),
+        "{err:?}"
+    );
+}
