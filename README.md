@@ -22,6 +22,8 @@ use fractic_context::define_ctx;
 define_ctx! {
     name: Ctx,
     env { PORT: u16 },
+    // Env vars naming the Secrets Manager region and secret id. Needed only
+    // when `secrets` is non-empty; see "Secrets" below.
     secrets_fetch_region: SECRETS_REGION,
     secrets_fetch_id: SECRETS_ID,
     secrets { DB_URL: String },
@@ -83,6 +85,28 @@ register_ctx_factory!(
     }
 ); // -> ProcessorFactory
 ```
+
+### Secrets
+
+`init()` reads the env vars named by `secrets_fetch_region` and
+`secrets_fetch_id` and fetches the `secrets` keys from that Secrets Manager
+secret. Both keys are required when `secrets` is non-empty (omitting one is a
+compile error). With `secrets {}` they can be left out: nothing is fetched,
+neither env var is read, and the context has no `secrets_fetch_region` /
+`secrets_fetch_id` fields, so a context of only `deps` initializes with no
+environment at all:
+
+```rust
+define_ctx! {
+    name: Ctx,
+    env {},
+    secrets {},
+    deps { dyn crate::UserRepository },
+    views {}
+}
+```
+
+Keys given alongside an empty `secrets {}` are accepted and ignored.
 
 ### Optional secrets
 

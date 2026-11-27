@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
-use crate::ast::DefineCtxInput;
+use crate::ast::{DefineCtxInput, SecretsFetch};
 use crate::codegen::shared::{gen_blocking_dep_artifacts, gen_dep_artifacts};
 use crate::helpers::{chain_to_snake, collect_valid_dep_tys, to_snake, type_ident_chain};
 
@@ -9,8 +9,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
     let DefineCtxInput {
         ctx_name,
         env,
-        secrets_region_ident,
-        secrets_id_ident,
+        secrets_fetch,
         secrets,
         deps,
         views,
@@ -97,7 +96,47 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
         .map(|kv| kv.key.to_string())
         .collect();
 
-    let secret_fetch: TokenStream2 = if !secrets.is_empty() {
+    // Reading the env vars that name the secret, and the fields that keep their
+    // values, exist only when there are secrets to fetch. Without secrets each
+    // piece below is `None` and expands to nothing.
+    let fetch = secrets_fetch.as_ref();
+    let fetch_vars_init = fetch.map(
+        |SecretsFetch {
+             region_ident,
+             id_ident,
+         }| {
+            quote! {
+                let secrets_fetch_region = std::env::var(stringify!(#region_ident))
+                    .map_err(|_| ::fractic_server_error::InitError::new(
+                        concat!("missing env var `", stringify!(#region_ident), "`")
+                    ).into())?;
+                let secrets_fetch_id = std::env::var(stringify!(#id_ident))
+                    .map_err(|_| ::fractic_server_error::InitError::new(
+                        concat!("missing env var `", stringify!(#id_ident), "`")
+                    ).into())?;
+            }
+        },
+    );
+    let fetch_field_defs = fetch.map(|_| {
+        quote! {
+            pub secrets_fetch_region: String,
+            pub secrets_fetch_id: String,
+        }
+    });
+    let fetch_field_inits = fetch.map(|_| quote! { secrets_fetch_region, secrets_fetch_id, });
+    let fetch_field_test_inits = fetch.map(|_| {
+        quote! {
+            secrets_fetch_region: String::new(),
+            secrets_fetch_id: String::new(),
+        }
+    });
+    let fetch_field_debug = fetch.map(|_| {
+        quote! {
+            ds.field("secrets_fetch_region", &self.secrets_fetch_region);
+            ds.field("secrets_fetch_id", &self.secrets_fetch_id);
+        }
+    });
+    let secret_fetch = fetch.map(|_| {
         quote! {
             let __secrets_util =
                 ::fractic_aws_secrets::SecretsUtil::new(secrets_fetch_region.clone()).await;
@@ -106,9 +145,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 .await
                 .map_err(|e| ::fractic_server_error::InitError::with_debug("failed to load secrets", &e).into())?;
         }
-    } else {
-        TokenStream2::new()
-    };
+    });
 
     let secret_inits: Vec<_> = secrets.iter().map(|kv| {
         let ident = to_snake(&kv.key);
@@ -252,8 +289,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             // Runtime settings.
             #(#env_field_defs,)*
             #(#secret_field_defs,)*
-            pub secrets_fetch_region: String,
-            pub secrets_fetch_id: String,
+            #fetch_field_defs
             // Dependency slots (top-level).
             #(#dep_field_defs,)*
             // Dependency overlays injected by views.
@@ -268,16 +304,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
             pub async fn init() -> ::std::result::Result<std::sync::Arc<Self>, ::fractic_server_error::ServerError> {
                 use std::sync::Arc;
 
-                // Mandatory runtime configuration.
-                let secrets_fetch_region = std::env::var(stringify!(#secrets_region_ident))
-                    .map_err(|_| ::fractic_server_error::InitError::new(
-                        concat!("missing env var `", stringify!(#secrets_region_ident), "`")
-                    ).into())?;
-                let secrets_fetch_id = std::env::var(stringify!(#secrets_id_ident))
-                    .map_err(|_| ::fractic_server_error::InitError::new(
-                        concat!("missing env var `", stringify!(#secrets_id_ident), "`")
-                    ).into())?;
-
+                #fetch_vars_init
                 #(#env_inits)*
                 #secret_fetch
                 #(#secret_inits)*
@@ -286,8 +313,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 let ctx = Arc::new_cyclic(|weak| Self {
                     #(#env_idents,)*
                     #(#secret_idents,)*
-                    secrets_fetch_region,
-                    secrets_fetch_id,
+                    #fetch_field_inits
                     #(#dep_field_inits,)*
                     // Overlay fields initialised to None inside macro expansion.
                     #(#view_overlay_field_inits)*
@@ -311,8 +337,7 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                 let ctx = Arc::new_cyclic(|weak| Self {
                     #(#env_idents,)*
                     #(#secret_idents,)*
-                    secrets_fetch_region: String::new(),
-                    secrets_fetch_id: String::new(),
+                    #fetch_field_test_inits
                     #(#dep_field_inits,)*
                     #(#view_overlay_field_inits)*
                     __weak_self: weak.clone(),
@@ -346,9 +371,8 @@ pub fn gen_define_ctx(input: DefineCtxInput) -> TokenStream2 {
                     ds.field(stringify!(#debug_env_fields), &self.#debug_env_fields);
                 )*
 
-                // mandatory runtime config
-                ds.field("secrets_fetch_region", &self.secrets_fetch_region);
-                ds.field("secrets_fetch_id",     &self.secrets_fetch_id);
+                // ── Secrets source --------------------------------------------
+                #fetch_field_debug
 
                 // ── Secrets (redacted) ----------------------------------------
                 #(
@@ -438,5 +462,22 @@ mod tests {
         );
         assert!(output.contains("missing secret key `"));
         syn::parse2::<syn::File>(gen_define_ctx(syn::parse_str("name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets { OPTIONAL: Option<String> }, deps {}, views {}").unwrap())).unwrap();
+    }
+    #[test]
+    fn reads_fetch_env_vars_only_when_there_are_secrets() {
+        let gen = |input: &str| gen_define_ctx(syn::parse_str(input).unwrap()).to_string();
+        for input in [
+            "name: Ctx, env {}, secrets {}, deps {}, views {}",
+            "name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets {}, deps {}, views {}",
+        ] {
+            let output = gen(input);
+            assert!(!output.contains("secrets_fetch"), "{input}");
+            assert!(!output.contains("std :: env :: var"), "{input}");
+            assert!(!output.contains("load_secrets"), "{input}");
+        }
+        let output = gen("name: Ctx, env {}, secrets_fetch_region: REGION, secrets_fetch_id: ID, secrets { KEY: String }, deps {}, views {}");
+        assert!(output.contains("stringify ! (REGION)"));
+        assert!(output.contains("stringify ! (ID)"));
+        assert!(output.contains("pub secrets_fetch_region : String"));
     }
 }
